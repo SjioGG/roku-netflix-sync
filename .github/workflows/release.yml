@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Python and JS test suites
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          for test in tests/*.cjs; do node "$test" || exit 1; done
+
+      - name: Package Chrome MV3 extension
+        run: ./bin/package-extension.sh
+
+      - name: Package server release bundle
+        run: |
+          mkdir -p release-bundle
+          cp sync_server.py roku_client.py roku_dashboard.py dashboard.html README.md ARCHITECTURE.md release-bundle/
+          cp dist/roku-netflix-sync-extension.zip release-bundle/
+          tar czf build.tar.gz -C release-bundle .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build.tar.gz
+            dist/roku-netflix-sync-extension.zip
+          generate_release_notes: true
