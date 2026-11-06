@@ -41,9 +41,11 @@ seek their own `<video>` element directly; Netflix keeps its Cadmium bridge.
 The extension adds only a compact status indicator. Use Netflix's own playback
 buttons, keyboard controls and timeline. There are no injected seek or sync buttons.
 
-- Selecting a watch page requests that Netflix title on Roku. If Netflix lands on
-  the episode overview screen, the relay presses Select once after a short settle
-  delay to start the episode.
+- Selecting a watch page requests that Netflix or YouTube title on Roku. If the
+  Roku lands on the episode overview screen (Netflix) or its splash/player
+  chrome (YouTube), the relay presses Select once after a short settle delay to
+  start the video. YouTube's launch reports `close` for about five seconds until
+  that press.
 - Click the status badge to re-sync: it pauses Chrome quietly, re-samples Roku and
   re-runs the alignment sequence, which recovers a mid-episode buffer stall.
 - When another Chrome client reports the same title, the badge shows its passive
@@ -73,7 +75,56 @@ positions. Cross-country end-to-end synchronization within 500 ms is not verifie
 
 The default bind addresses are loopback. A Cloudflare Tunnel can route to port
 8766; only relay clients with the room token can control the Roku. The dashboard
-is a separate local diagnostic, required by the relay's sample endpoint.
+is a separate local diagnostic; the relay no longer requires it (see
+[Cloud relay with a home Roku bridge](#cloud-relay-with-a-home-roku-bridge)).
+
+## Cloud relay with a home Roku bridge
+
+Run the relay anywhere and keep only the Roku hop on the home LAN.
+
+```
+Cloud VPS / Docker            home network                 living room
+sync_server.py  ◄── bridge ── roku_client.py  ──── ECP ────► Roku :8060
+    :8766         state/commands                       192.168.1.100
+```
+
+`roku_client.py` reports the TV's state to the relay and executes queued ECP
+requests, so `/query/media-player`, `/keypress/*`, `/launch/*`, seeks and
+scheduled starts all work unchanged from the cloud.
+
+### 1. Relay on the server
+
+```sh
+SYNC_TOKEN='pick-a-room-token' docker compose up -d
+docker compose logs -f sync-server
+```
+
+`docker-compose.yml` publishes port 8766 and sets `ROKU_BRIDGE_ONLY=1`, so every
+Roku command is queued for the bridge instead of dialled directly. For a bare
+VPS, copy `deploy/roku-sync-server.service` to `/etc/systemd/system/`, put the
+token in `/etc/roku-sync/sync.env`, then `systemctl enable --now roku-sync-server`.
+`SYNC_HOST` defaults to `127.0.0.1`; set `SYNC_HOST=0.0.0.0` (or bind loopback
+behind a Cloudflare Tunnel) for the container.
+
+### 2. Bridge client at home
+
+```sh
+SYNC_SERVER_URL=https://netflix-sync.example.com \
+SYNC_TOKEN='pick-a-room-token' \
+ROKU_URL=http://192.168.1.100:8060 \
+python3 roku_client.py
+```
+
+The client is stdlib-only Python 3 and prints one line per failed cycle. On the
+Mac, `deploy/com.sjiogg.roku-bridge-client.plist` runs it under launchd (edit
+the token, copy to `~/Library/LaunchAgents/`, then `launchctl load`). Logs go to
+`/tmp/roku-bridge-client.log`.
+
+The relay still dials the Roku directly when it can reach it, and switches a
+request to the bridge when `ROKU_BRIDGE_ONLY=1`, or when a client reported in
+the last 10 s and the configured `ROKU_URL` does not answer. `POST /sample` uses
+the local dashboard when it is running and falls back to sampling through the
+bridge, so no `roku_dashboard.py` is needed in the cloud.
 
 ## Checks
 

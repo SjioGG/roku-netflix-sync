@@ -1,0 +1,44 @@
+[Unit]
+Description=Roku + Chrome sync relay (cloud VPS)
+Documentation=https://github.com/SjioGG/roku-netflix-sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged account: sudo useradd --system --home /opt/roku-sync --shell /usr/sbin/nologin roku-sync
+User=roku-sync
+Group=roku-sync
+WorkingDirectory=/opt/roku-sync
+
+# Room token and bind settings live outside the repo. Keep the file mode 0600
+# and owned by roku-sync so the secret is not world-readable.
+EnvironmentFile=/etc/roku-sync/sync.env
+# Minimum required in /etc/roku-sync/sync.env:
+#   SYNC_TOKEN=<room token>
+#   SYNC_HOST=127.0.0.1
+#   SYNC_PORT=8766
+#   ROKU_BRIDGE_ONLY=1
+# Bind to loopback and let the Cloudflare Tunnel reach it: never expose the
+# relay port directly to the internet.
+
+ExecStart=/usr/bin/python3 /opt/roku-sync/sync_server.py
+Restart=always
+RestartSec=2
+
+# The relay only needs its script, the network and no writable paths.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

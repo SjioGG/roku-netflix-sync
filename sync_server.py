@@ -6,7 +6,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROKU = os.environ.get('ROKU_URL', 'http://192.168.1.100:8060').rstrip('/')
 TOKEN = os.environ.get('SYNC_TOKEN') or secrets.token_urlsafe(24)
-lock = threading.Lock()
+# Local diagnostic sampler; optional now that :func:`sample_paused_direct` exists.
+DASHBOARD_SAMPLE_URL = os.environ.get('DASHBOARD_SAMPLE_URL', 'http://127.0.0.1:8765/sample-paused')
+# Remote Roku bridge timing: how long a queued ECP call waits for the home client,
+# and how recently that client must have reported for the link to count as live.
+BRIDGE_TIMEOUT_S = 5.0
+BRIDGE_FRESH_S = 10.0
+# Re-entrant so ``roku()`` may wait on the bridge from code that already holds the
+# room lock (for example a remote keypress inside ``with lock`` in ``/event``).
+lock = threading.RLock()
 
 # Roku ECP plugin IDs for the streaming apps the relay can launch and follow.
 STREAMING_APPS = {'12': 'Netflix', '837': 'YouTube', '13535': 'Plex', '13': 'Prime Video', '291097': 'Disney Plus', '61322': 'HBO Max', '551012': 'Apple TV', '2285': 'Hulu', '624064': 'Nebula', '817397': 'Twitch'}
@@ -15,15 +23,103 @@ SYNC_MODES = ('roku', 'peer')
 TITLE_ID_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
 APP_NAME_RE = re.compile(r'[A-Za-z0-9_-]{1,32}')
 
-shared = {'seq': 0, 'event': None, 'roku': 'unknown', 'position_ms': None, 'error': None, 'last_update': 0, 'title_id': None, 'launch_status': None, 'launch_started': None, 'timing': None, 'sample': None, 'scheduled': None, 'generation': 0, 'sampling': False, 'chrome': None, 'clients': {}, 'drift_ms': None, 'roku_poll_ms': 15, 'roku_toggle_ms': 40, 'roku_state_transition_ms': 220, 'app_id': None, 'app_name': None, 'sync_mode': 'roku', 'master_client_id': None, 'master_state': None}
+shared = {'seq': 0, 'event': None, 'roku': 'unknown', 'position_ms': None, 'error': None, 'last_update': 0, 'title_id': None, 'launch_status': None, 'launch_started': None, 'timing': None, 'sample': None, 'scheduled': None, 'generation': 0, 'sampling': False, 'chrome': None, 'clients': {}, 'drift_ms': None, 'roku_poll_ms': 15, 'roku_toggle_ms': 40, 'roku_state_transition_ms': 220, 'app_id': None, 'app_name': None, 'sync_mode': 'roku', 'master_client_id': None, 'master_state': None, 'bridge_active': False, 'bridge_only': False}
 suppress_until = 0
 launch_lock = threading.Lock()
 seek_lock = threading.Lock()
 
+# --- Remote Roku bridge ------------------------------------------------------
+# A cloud-hosted relay cannot reach the home LAN, so ``roku_client.py`` runs on
+# the home network and long-polls ``/roku-bridge/state``. It reports what the TV
+# is doing and drains queued ECP requests, so every existing feature keeps using
+# plain ``roku(path, post)`` calls.
+bridge_commands = []
+bridge_results = {}
+bridge_cond = threading.Condition(lock)
+bridge_last_seen = 0.0
+bridge_seq = 0
+
+
+def bridge_enabled():
+    """True when ECP traffic must travel through ``roku_client.py``."""
+    return os.environ.get('ROKU_BRIDGE_ONLY') == '1' or bool(shared.get('bridge_only'))
+
+
+def bridge_is_live(now=None):
+    """True when a bridge client reported within :data:`BRIDGE_FRESH_S`."""
+    seen = bridge_last_seen
+    if not seen:
+        return False
+    return (time.monotonic() if now is None else now) - seen <= BRIDGE_FRESH_S
+
+
+def reset_bridge():
+    """Clear bridge queues and liveness. Tests call this between cases."""
+    global bridge_last_seen, bridge_seq
+    with bridge_cond:
+        bridge_commands.clear()
+        bridge_results.clear()
+        bridge_last_seen = 0.0
+        bridge_seq = 0
+        bridge_cond.notify_all()
+    _direct_probe.update({'at': 0.0, 'ok': None})
+
+
+def bridge_roku(path, post=False, timeout=BRIDGE_TIMEOUT_S):
+    """Queue one ECP request for the home client and wait for its result."""
+    global bridge_seq
+    command_id = secrets.token_urlsafe(9)
+    command = {'id': command_id, 'path': path, 'post': bool(post)}
+    with bridge_cond:
+        bridge_seq += 1
+        command['seq'] = bridge_seq
+        bridge_commands.append(command)
+        bridge_cond.notify_all()
+        deadline = time.monotonic() + timeout
+        while command_id not in bridge_results:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                bridge_commands[:] = [c for c in bridge_commands if c['id'] != command_id]
+                raise OSError('Roku bridge timed out after %gs. Is roku_client.py running?' % timeout)
+            bridge_cond.wait(remaining)
+        result = bridge_results.pop(command_id)
+    if result.get('error'):
+        raise OSError('Roku bridge error: ' + str(result['error']))
+    body = result.get('body') or ''
+    return body.encode() if isinstance(body, str) else body
+
+
 def roku(path, post=False):
+    """Send an ECP request, locally or through a remote bridge client."""
+    if bridge_enabled() or (bridge_is_live() and not direct_roku_reachable()):
+        return bridge_roku(path, post)
     req = urllib.request.Request(ROKU + path, data=b'' if post else None)
     with urllib.request.urlopen(req, timeout=3) as response:
         return response.read()
+
+
+_direct_probe = {'at': 0.0, 'ok': None}
+DIRECT_PROBE_TTL_S = 5.0
+
+
+def direct_roku_reachable():
+    """Whether the configured Roku address answers from this host.
+
+    A cloud relay cannot reach the home LAN, so a failed probe routes ECP
+    traffic through the bridge client instead. Results are cached briefly: the
+    state poller calls :func:`roku` every 500 ms and each probe costs a timeout.
+    """
+    now = time.monotonic()
+    if _direct_probe['ok'] is not None and now - _direct_probe['at'] < DIRECT_PROBE_TTL_S:
+        return _direct_probe['ok']
+    try:
+        with urllib.request.urlopen(ROKU + '/query/device-info', timeout=1) as response:
+            response.read(1)
+        reachable = True
+    except (OSError, urllib.error.URLError, ValueError):
+        reachable = False
+    _direct_probe.update({'at': now, 'ok': reachable})
+    return reachable
 
 def query_roku_media():
     """Return ``(state, plugin_id, position_ms)`` for the active Roku media player."""
@@ -217,11 +313,16 @@ def client_drift_ms(title_id, now_ms, window_ms=10000):
     positions=[value['position_ms'] for value in fresh]
     return round(max(positions)-min(positions))
 
-def auto_select_after_launch(title_id):
-    """Press Select once when a launch left Roku on the episode overview screen.
+def auto_select_after_launch(title_id, app_id=None):
+    """Press Select once when a launch left Roku on a menu instead of playing.
 
-    Netflix deep links sometimes land on the episode overview (or a stalled player)
-    instead of playing. Skipped when the room has since moved to another title.
+    Netflix deep links sometimes land on the episode overview (or a stalled
+    player) instead of playing. YouTube behaves the same way: after
+    ``/launch/837?contentId=<id>`` the Roku reports
+    ``<player state="close"><plugin id="837"/></player>`` for about five seconds
+    until ``Select`` is pressed, which starts the video immediately. Both apps
+    are therefore treated identically; ``app_id`` is only informational.
+    Skipped when the room has since moved to another title.
     """
     global suppress_until
     time.sleep(AUTO_SELECT_SETTLE_S)
@@ -232,8 +333,10 @@ def auto_select_after_launch(title_id):
         state, active_app, position = query_roku_player()
     except (OSError, urllib.error.URLError, ET.ParseError, ValueError):
         return False
-    if state != 'close' and not active_app:
+    if state != 'close' and not active_app and state != 'stop':
         return False
+    # The YouTube splash and the Netflix overview both report close/stop; a
+    # position under a second at 'play' means the same thing.
     stalled = state in ('close', 'stop') or (state == 'play' and position is not None and position < 1000)
     if not stalled:
         return False
@@ -257,9 +360,24 @@ def invalidate_sync():
 
 
 def poll_roku():
+    """Poll the Roku directly, unless a bridge client is supplying state.
+
+    A connected ``roku_client.py`` already polls the TV from the home LAN, so
+    the relay must not spend its own requests (or log errors) on an address it
+    cannot reach.
+    """
     global suppress_until
     last = None
     while True:
+        if bridge_enabled() or (bridge_is_live() and not direct_roku_reachable()):
+            # Bridge state and its play/pause events arrive on POST /roku-bridge/state.
+            if bridge_enabled() and not bridge_is_live():
+                with lock:
+                    if not shared.get('error'):
+                        # Explain an idle room instead of leaving the last state up.
+                        shared.update(error='Roku bridge client not connected', roku='unavailable')
+            time.sleep(0.5)
+            continue
         try:
             query_started=time.monotonic()
             root = ET.fromstring(roku('/query/media-player'))
@@ -336,6 +454,84 @@ def perform_scheduled_start(scheduled, deadline):
         threading.Thread(target=verify_scheduled_start,args=(scheduled,),daemon=True).start()
 
 
+def sample_paused_direct():
+    """Double-toggle paused position sample without the local dashboard.
+
+    Mirrors ``roku_dashboard.py``'s ``/sample-paused`` but talks to the Roku over
+    :func:`roku`, so it works when the relay is deployed away from the LAN (the
+    request goes out through ``roku_client.py``). Returns the same payload shape
+    the dashboard replies with, and raises ``ValueError`` for a player that is
+    not paused/playing as expected.
+    """
+    started = time.monotonic()
+    timings = []
+
+    def query():
+        sent = time.monotonic()
+        root = ET.fromstring(roku('/query/media-player'))
+        timings.append({'operation': 'query', 'round_trip_ms': round((time.monotonic() - sent) * 1000), 'received_at_ms': round(time.time() * 1000)})
+        plugin = root.find('plugin')
+        if plugin is None or plugin.get('id') not in STREAMING_APPS:
+            raise ValueError('A supported streaming app is not the active player')
+        return root.get('state'), root.findtext('position')
+
+    def toggle():
+        sent = time.monotonic()
+        roku('/keypress/Play', post=True)
+        timings.append({'operation': 'toggle', 'round_trip_ms': round((time.monotonic() - sent) * 1000), 'received_at_ms': round(time.time() * 1000)})
+
+    state, before = query()
+    if state != 'pause':
+        raise ValueError('Roku must report paused before sampling; no command sent.')
+    toggle()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        time.sleep(.2)
+        state, _ = query()
+        if state == 'play':
+            break
+    if state != 'play':
+        raise ValueError('Could not confirm Roku started playing. Check the TV and pause it manually if needed; no second toggle sent.')
+    toggle()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        time.sleep(.2)
+        state, after = query()
+        if state == 'pause':
+            break
+    if state != 'pause':
+        raise ValueError('Could not confirm Roku paused again. Check the TV.')
+    return {'before': before, 'after': after, 'state': state, 'duration_ms': round((time.monotonic() - started) * 1000), 'timings': timings, 'warning': 'Roku-reported values may be stale; verify against the TV.'}
+
+
+def apply_sample_result(result, generation):
+    """Store a completed sample on ``shared``.
+
+    Shared by the dashboard path and :func:`sample_paused_direct` so both
+    produce identical timing calibration and sample records. Returns an error
+    string when playback changed while sampling.
+    """
+    after = result.get('after')
+    timings = result.get('timings') or []
+    toggle_rtts = [t['round_trip_ms'] for t in timings if isinstance(t, dict) and t.get('operation') == 'toggle' and isinstance(t.get('round_trip_ms'), (int, float))]
+    toggles = [t for t in timings if isinstance(t, dict) and t.get('operation') == 'toggle' and isinstance(t.get('received_at_ms'), (int, float))]
+    match = re.fullmatch(r'(\d+)\s*ms', after or '')
+    if not match:
+        return None
+    with lock:
+        if generation != shared['generation']:
+            return 'Playback changed during sampling. Pause both and sample again.'
+        if toggle_rtts:
+            shared['roku_toggle_ms'] = round(sum(toggle_rtts) / len(toggle_rtts))
+        if len(toggles) >= 2:
+            shared['roku_state_transition_ms'] = max(20, min(1000, round(toggles[1]['received_at_ms'] - toggles[0]['received_at_ms'])))
+        sample = {'position_ms': int(match.group(1)), 'at_ms': round(time.time() * 1000), 'id': secrets.token_urlsafe(12), 'generation': generation, 'title_id': shared['title_id']}
+        shared['sample'] = sample
+        shared.update(roku='pause', position_ms=sample['position_ms'], last_update=time.time())
+        result['sample_id'] = sample['id']
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
     def reply(self, code, obj):
@@ -344,6 +540,99 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
     def authorized(self):
         return hmac.compare_digest(self.headers.get('Authorization',''), 'Bearer '+TOKEN)
+    def bridge_state(self):
+        """``roku_client.py`` reports the TV's state and drains queued commands."""
+        global bridge_last_seen
+        try:
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0 < length <= 4096: raise ValueError('Invalid request')
+            body=json.loads(self.rfile.read(length))
+            if not isinstance(body,dict): raise ValueError('Expected a JSON object')
+            state=body.get('roku')
+            if not isinstance(state,str) or not state or len(state)>32: raise ValueError('Invalid Roku state')
+            position=body.get('position_ms')
+            if position is not None and (not isinstance(position,(int,float)) or isinstance(position,bool) or not 0 <= position <= 86400000):
+                raise ValueError('Invalid position')
+            poll_ms=body.get('roku_poll_ms')
+            if poll_ms is not None and (not isinstance(poll_ms,(int,float)) or isinstance(poll_ms,bool) or not 0 <= poll_ms <= 60000):
+                raise ValueError('Invalid poll timing')
+            app_id=body.get('app_id'); app_name=body.get('app_name'); error=body.get('error')
+            if app_id is not None and (not isinstance(app_id,str) or len(app_id)>32): raise ValueError('Invalid app id')
+            if app_name is not None and (not isinstance(app_name,str) or len(app_name)>32): raise ValueError('Invalid app name')
+            if error is not None and not isinstance(error,str): raise ValueError('Invalid error')
+        except (ValueError,TypeError,json.JSONDecodeError) as e:
+            return self.reply(400,{'error':str(e)})
+        active = bool(app_id) and app_id in STREAMING_APPS
+        with bridge_cond:
+            bridge_last_seen = time.monotonic()
+            # Mirror poll_roku(): a non-streaming app is reported as "not Netflix"
+            # while a transport error keeps its own value.
+            reported = state if active or error else 'not Netflix'
+            last = shared.get('roku')
+            shared.update(roku=reported,
+                          position_ms=round(position) if position is not None else None,
+                          error=error, last_update=time.time(), bridge_active=True,
+                          app_id=app_id if active else None,
+                          app_name=app_name or (STREAMING_APPS.get(app_id) if active else None))
+            if poll_ms is not None: shared['roku_poll_ms']=round(poll_ms)
+            if active and state in ('play','pause') and last in ('play','pause') and state != last and time.monotonic() > suppress_until:
+                invalidate_sync()
+                publish('roku', state, shared['position_ms'])
+            pending=list(bridge_commands)
+            bridge_commands.clear()
+        return self.reply(200,{'ok':True,'commands':pending})
+
+    def bridge_result(self):
+        """``roku_client.py`` returns the body (or error) for one command."""
+        global bridge_last_seen
+        try:
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0 < length <= 1024*1024: raise ValueError('Invalid request')
+            body=json.loads(self.rfile.read(length))
+            if not isinstance(body,dict): raise ValueError('Expected a JSON object')
+            command_id=body.get('id')
+            if not isinstance(command_id,str) or not command_id or len(command_id)>64: raise ValueError('Invalid command id')
+            result_body=body.get('body') or ''
+            if not isinstance(result_body,str): raise ValueError('Invalid command body')
+            error=body.get('error')
+            if error is not None and not isinstance(error,str): raise ValueError('Invalid error')
+        except (ValueError,TypeError,json.JSONDecodeError) as e:
+            return self.reply(400,{'error':str(e)})
+        with bridge_cond:
+            bridge_last_seen = time.monotonic()
+            bridge_results[command_id]={'body':result_body,'error':error or None,'at':time.monotonic()}
+            # The command has been executed, so drop it in case the waiter timed out.
+            bridge_commands[:]=[c for c in bridge_commands if c['id'] != command_id]
+            # Drop results nobody collected: the waiter gave up or the client went away.
+            stale=[key for key,value in bridge_results.items() if time.monotonic()-value['at']>120]
+            for key in stale: del bridge_results[key]
+            bridge_cond.notify_all()
+        return self.reply(200,{'ok':True})
+
+    def bridge_command(self):
+        """Queue one ECP request and wait for the bridge client's reply.
+
+        ``roku()`` already routes automatically, so this endpoint is for clients
+        that want to drive the TV explicitly. Reply is ``{'ok': True, 'body': str}``.
+        """
+        try:
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0 < length <= 1024: raise ValueError('Invalid request')
+            body=json.loads(self.rfile.read(length))
+            if not isinstance(body,dict): raise ValueError('Expected a JSON object')
+            path=body.get('path')
+            if not isinstance(path,str) or not path.startswith('/') or len(path)>512: raise ValueError('Invalid path')
+            post=bool(body.get('post'))
+        except (ValueError,TypeError,json.JSONDecodeError) as e:
+            return self.reply(400,{'error':str(e)})
+        if not bridge_is_live() or not bridge_enabled():
+            return self.reply(409,{'error':'No Roku bridge client is connected.'})
+        try:
+            result=bridge_roku(path,post)
+        except OSError as exc:
+            return self.reply(502,{'error':str(exc)})
+        return self.reply(200,{'ok':True,'body':result.decode('utf-8','replace')})
+
     def do_GET(self):
         if not self.authorized(): return self.reply(401, {'error':'Unauthorized'})
         if self.path == '/clock':
@@ -358,8 +647,14 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, data)
     def do_POST(self):
         received_at_ms = round(time.time() * 1000)
-        global suppress_until
+        global suppress_until, bridge_last_seen
         if not self.authorized(): return self.reply(401, {'error':'Unauthorized'})
+        if self.path == '/roku-bridge/state':
+            return self.bridge_state()
+        if self.path == '/roku-bridge/result':
+            return self.bridge_result()
+        if self.path == '/roku-bridge/command':
+            return self.bridge_command()
         if self.path == '/baton':
             try:
                 length=int(self.headers.get('Content-Length','0'))
@@ -436,26 +731,34 @@ class Handler(BaseHTTPRequestHandler):
                 generation=shared['generation']
                 shared['sampling']=True
                 suppress_until=time.monotonic()+10
+                use_bridge = bridge_enabled() or (bridge_is_live() and not direct_roku_reachable())
             try:
-                request=urllib.request.Request('http://127.0.0.1:8765/sample-paused',data=b'',method='POST')
-                with urllib.request.urlopen(request,timeout=9) as response: result=json.load(response)
-                after=result.get('after')
-                timings=result.get('timings') or []
-                toggle_rtts=[t['round_trip_ms'] for t in timings if isinstance(t,dict) and t.get('operation')=='toggle' and isinstance(t.get('round_trip_ms'),(int,float))]
-                toggles=[t for t in timings if isinstance(t,dict) and t.get('operation')=='toggle' and isinstance(t.get('received_at_ms'),(int,float))]
-                match=re.fullmatch(r'(\d+)\s*ms',after or '')
-                if match:
-                    with lock:
-                        if generation != shared['generation']:
-                            return self.reply(409, {'error':'Playback changed during sampling. Pause both and sample again.'})
-                        if toggle_rtts:
-                            shared['roku_toggle_ms']=round(sum(toggle_rtts)/len(toggle_rtts))
-                        if len(toggles)>=2:
-                            shared['roku_state_transition_ms']=max(20,min(1000,round(toggles[1]['received_at_ms']-toggles[0]['received_at_ms'])))
-                        sample={'position_ms':int(match.group(1)),'at_ms':round(time.time()*1000),'id':secrets.token_urlsafe(12),'generation':generation,'title_id':shared['title_id']}
-                        shared['sample']=sample
-                        shared.update(roku='pause',position_ms=sample['position_ms'],last_update=time.time())
-                        result['sample_id']=sample['id']
+                if use_bridge:
+                    # Cloud deployments have no local dashboard; sample directly.
+                    try:
+                        result=sample_paused_direct()
+                    except ValueError as e:
+                        return self.reply(409, {'error':str(e)})
+                    except (OSError, urllib.error.URLError, ET.ParseError) as e:
+                        return self.reply(502, {'error':str(e)+'. Check whether the Roku is paused.'})
+                    changed=apply_sample_result(result,generation)
+                    if changed: return self.reply(409, {'error':changed})
+                    return self.reply(200,result)
+                try:
+                    request=urllib.request.Request(DASHBOARD_SAMPLE_URL,data=b'',method='POST')
+                    with urllib.request.urlopen(request,timeout=9) as response: result=json.load(response)
+                except (urllib.error.URLError, OSError) as exc:
+                    # No dashboard on this host: fall back to the direct sampler.
+                    if isinstance(exc, urllib.error.HTTPError):
+                        raise
+                    try:
+                        result=sample_paused_direct()
+                    except ValueError as e:
+                        return self.reply(409, {'error':str(e)})
+                    except (OSError, urllib.error.URLError, ET.ParseError) as e:
+                        return self.reply(502, {'error':str(e)+'. Check whether the Roku is paused.'})
+                changed=apply_sample_result(result,generation)
+                if changed: return self.reply(409, {'error':changed})
                 return self.reply(200,result)
             except urllib.error.HTTPError as e:
                 try: result=json.load(e)
@@ -578,7 +881,7 @@ class Handler(BaseHTTPRequestHandler):
                         with lock:
                             if shared['title_id'] == title: shared['launch_status'] = result
                         if result == 'sent':
-                            auto_select_after_launch(title)
+                            auto_select_after_launch(title, target_app_id)
                             schedule_launch_recovery(title, target_app_id)
                 threading.Thread(target=launch_title, daemon=True).start()
                 return self.reply(202, {'ok':True, 'message':'Title launch requested; check TV'})
@@ -641,9 +944,13 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, json.JSONDecodeError) as exc: self.reply(400, {'error':str(exc)})
 
 if __name__ == '__main__':
+    SYNC_HOST = os.environ.get('SYNC_HOST', '127.0.0.1')
+    SYNC_PORT = int(os.environ.get('SYNC_PORT', '8766'))
     threading.Thread(target=poll_roku, daemon=True).start()
-    print('Sync relay: http://127.0.0.1:8766\nRoom token: '+TOKEN, flush=True)
-    server=ThreadingHTTPServer(('127.0.0.1',8766),Handler)
+    print('Sync relay: http://%s:%d\nRoom token: %s' % (SYNC_HOST, SYNC_PORT, TOKEN), flush=True)
+    if bridge_enabled():
+        print('Roku mode: bridge (commands are queued for roku_client.py)', flush=True)
+    server = ThreadingHTTPServer((SYNC_HOST, SYNC_PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

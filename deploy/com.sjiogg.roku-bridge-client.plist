@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs the home-LAN Roku bridge client on the Mac.
+
+  Install:
+    cp deploy/com.sjiogg.roku-bridge-client.plist ~/Library/LaunchAgents/
+    # edit the SYNC_SERVER_URL / SYNC_TOKEN values below, then:
+    launchctl unload ~/Library/LaunchAgents/com.sjiogg.roku-bridge-client.plist 2>/dev/null
+    launchctl load  ~/Library/LaunchAgents/com.sjiogg.roku-bridge-client.plist
+    launchctl list | grep roku-bridge-client
+
+  Logs: /tmp/roku-bridge-client.log and /tmp/roku-bridge-client.err
+  Never put the room token in the repo; it lives in this per-user copy only.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sjiogg.roku-bridge-client</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/ABSOLUTE/PATH/TO/roku-netflix-sync/roku_client.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SYNC_SERVER_URL</key>
+        <string>http://127.0.0.1:8766</string>
+        <key>SYNC_TOKEN</key>
+        <string>REPLACE_WITH_ROOM_TOKEN</string>
+        <key>ROKU_URL</key>
+        <string>http://192.168.1.100:8060</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/ABSOLUTE/PATH/TO/roku-netflix-sync</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/roku-bridge-client.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/roku-bridge-client.err</string>
+</dict>
+</plist>

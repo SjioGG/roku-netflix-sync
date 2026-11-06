@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import threading
 import time
@@ -9,6 +10,67 @@ from unittest.mock import patch, call
 import sys
 sys.path.insert(0, '.')
 import sync_server as relay
+
+# Real transport captured before any test patches ``urllib``. The bridge client
+# must reach the live relay while its Roku calls are mocked.
+REAL_URLOPEN = urllib.request.urlopen
+PLAYER_PAUSED = b'<player state="pause"><plugin id="12" name="Netflix"/><position>42000 ms</position></player>'
+PLAYER_PLAYING = b'<player state="play"><plugin id="12" name="Netflix"/><position>42200 ms</position></player>'
+PLAYER_PAUSED_AFTER = b'<player state="pause"><plugin id="12" name="Netflix"/><position>43500 ms</position></player>'
+
+
+def route_client_http(server_url, roku_fake):
+    """Client transport that sends relay calls over real HTTP and Roku calls to a fake."""
+    def client_http(url, data=None, method=None, timeout=5, token=None, content_type=None):
+        if url.startswith(server_url):
+            headers = {'Authorization': 'Bearer ' + token} if token else {}
+            if content_type:
+                headers['Content-Type'] = content_type
+            request = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with REAL_URLOPEN(request, timeout=timeout) as response:
+                return response.read()
+        return roku_fake(url, data=data, method=method, timeout=timeout)
+    return client_http
+
+
+def post_json(url, path, body):
+    """POST over the captured real transport, unaffected by ``urlopen`` patches."""
+    request = urllib.request.Request(url + path, data=json.dumps(body).encode(),
+                                     headers={'Authorization': 'Bearer test-only'})
+    with REAL_URLOPEN(request, timeout=2) as response:
+        return json.loads(response.read() or b'{}')
+
+
+class FakeRoku:
+    """Minimal ECP device: state, position and a Play keypress that toggles.
+
+    Position only advances when playback resumes and pauses again, matching the
+    Roku's habit of freezing the reported position while paused.
+    """
+    def __init__(self, state='pause', position=42000, plugin='12'):
+        self.state = state
+        self.position = position
+        self.plugin = plugin
+        self.paths = []
+
+    def __call__(self, url, data=None, method=None, timeout=5):
+        from urllib.parse import urlsplit
+        path = urlsplit(url).path
+        self.paths.append((path, method or 'GET'))
+        if path == '/query/media-player':
+            return ('<player state="%s"><plugin id="%s" name="Netflix"/><position>%d ms</position></player>'
+                    % (self.state, self.plugin, self.position)).encode()
+        if path == '/keypress/Play' and (method or 'GET') == 'POST':
+            if self.state == 'pause':
+                self.state = 'play'
+            else:
+                self.state = 'pause'
+                self.position += 1300
+            return b''
+        if path.startswith('/launch/') or path.startswith('/keypress/'):
+            return b''
+        raise AssertionError('unexpected Roku path ' + path)
+
 
 class RelayTest(unittest.TestCase):
     @classmethod
@@ -22,7 +84,9 @@ class RelayTest(unittest.TestCase):
         cls.server.shutdown();cls.server.server_close()
     def setUp(self):
         with relay.lock:
-            relay.shared.update(title_id=None, launch_status=None, launch_started=None, roku='pause',last_update=time.time(), sample=None, scheduled=None, generation=0, sync_mode='roku', master_client_id=None, master_state=None, app_id=None, app_name=None, clients={})
+            relay.shared.update(title_id=None, launch_status=None, launch_started=None, roku='pause',last_update=time.time(), sample=None, scheduled=None, generation=0, sync_mode='roku', master_client_id=None, master_state=None, app_id=None, app_name=None, clients={}, bridge_active=False, bridge_only=False)
+        relay.reset_bridge()
+        relay.suppress_until = 0
     def request(self,path,body=None,auth=True):
         data=None if body is None else json.dumps(body).encode()
         req=urllib.request.Request(self.url+path,data=data,headers={'Authorization':'Bearer test-only'} if auth else {})
@@ -404,6 +468,342 @@ class RelayTest(unittest.TestCase):
         with patch.object(relay,'roku',side_effect=fake),patch.object(relay.time,'sleep'):
             self.assertEqual(relay.recover_stalled_launch('777'),'recovered')
         self.assertEqual([p for p,post in calls if post],['/keypress/Select'])
+
+    # --- BEE-231: remote Roku bridge and cloud deployment --------------------
+    def test_bridge_state_updates_room_and_returns_queued_commands(self):
+        with relay.lock:
+            relay.bridge_commands.append({'id':'cmd-1','path':'/keypress/Play','post':True})
+        body={'roku':'play','app_id':'837','app_name':'YouTube','position_ms':12345,'roku_poll_ms':9}
+        with self.request('/roku-bridge/state',body) as response:
+            data=json.load(response)
+        self.assertTrue(data['ok'])
+        self.assertEqual([c['id'] for c in data['commands']],['cmd-1'])
+        with relay.lock:
+            self.assertTrue(relay.shared['bridge_active'])
+            self.assertEqual(relay.shared['roku'],'play')
+            self.assertEqual(relay.shared['app_id'],'837')
+            self.assertEqual(relay.shared['app_name'],'YouTube')
+            self.assertEqual(relay.shared['position_ms'],12345)
+            self.assertEqual(relay.shared['roku_poll_ms'],9)
+            self.assertEqual(relay.bridge_commands,[])
+        self.assertTrue(relay.bridge_is_live())
+
+    def test_bridge_state_rejects_malformed_payloads(self):
+        for body in ({'roku':''},{'roku':'play','position_ms':-1},{'roku':'play','app_id':'x'*33},{'nope':True}):
+            with self.assertRaises(urllib.error.HTTPError) as e:self.request('/roku-bridge/state',body)
+            self.assertEqual(e.exception.code,400,body); e.exception.close()
+
+    def test_bridge_state_publishes_roku_play_pause_change(self):
+        with relay.lock:
+            relay.shared.update(roku='pause', last_update=time.time(), event=None, seq=0)
+            relay.shared.pop('bridge_roku_last',None)
+        self.request('/roku-bridge/state',{'roku':'pause','app_id':'12','position_ms':1000}).close()
+        with relay.lock: relay.shared['generation']=0
+        with self.request('/roku-bridge/state',{'roku':'play','app_id':'12','position_ms':2500}) as response:
+            self.assertEqual(response.status,200)
+        with relay.lock:
+            event=relay.shared['event']
+            self.assertEqual(event['source'],'roku')
+            self.assertEqual(event['action'],'play')
+            self.assertEqual(event['position'],2500)
+
+    def test_bridge_requires_the_room_token(self):
+        with self.assertRaises(urllib.error.HTTPError) as e:self.request('/roku-bridge/state',{'roku':'play'},auth=False)
+        self.assertEqual(e.exception.code,401); e.exception.close()
+
+    def test_bridge_result_releases_a_waiting_command(self):
+        relay.shared['bridge_only']=True
+        outcome={}
+        def waiting():
+            try: outcome['body']=relay.roku('/keypress/Play',post=True)
+            except OSError as exc: outcome['error']=str(exc)
+        thread=threading.Thread(target=waiting,daemon=True); thread.start()
+        with relay.lock:
+            for _ in range(100):
+                if relay.bridge_commands: break
+                relay.lock.release(); time.sleep(.01); relay.lock.acquire()
+            command=relay.bridge_commands[0]
+        with self.request('/roku-bridge/result',{'id':command['id'],'body':'ok'}) as response:
+            self.assertEqual(response.status,200)
+        thread.join(2)
+        self.assertEqual(outcome,{'body':b'ok'})
+        with relay.lock: self.assertEqual(relay.bridge_results,{})
+
+    def test_bridge_roku_raises_on_client_error_and_timeout(self):
+        relay.shared['bridge_only']=True
+        with patch.object(relay,'BRIDGE_TIMEOUT_S',0.2):
+            def answering():
+                with relay.lock:
+                    for _ in range(200):
+                        if relay.bridge_commands: break
+                        relay.lock.release(); time.sleep(.01); relay.lock.acquire()
+                    command=relay.bridge_commands[0]
+                self.request('/roku-bridge/result',{'id':command['id'],'error':'Roku unreachable'}).close()
+            threading.Thread(target=answering,daemon=True).start()
+            with self.assertRaises(OSError) as e:relay.roku('/query/media-player')
+        self.assertIn('unreachable',str(e.exception))
+        with patch.object(relay,'BRIDGE_TIMEOUT_S',0.2):
+            with self.assertRaises(OSError) as e:relay.roku('/query/media-player')
+        self.assertIn('timed out',str(e.exception))
+        with relay.lock: self.assertEqual(relay.bridge_commands,[])
+
+    def test_roku_routes_through_bridge_when_only_mode_is_on(self):
+        relay.shared['bridge_only']=True
+        def answering():
+            with relay.lock:
+                for _ in range(200):
+                    if relay.bridge_commands: break
+                    relay.lock.release(); time.sleep(.01); relay.lock.acquire()
+                command=relay.bridge_commands[0]
+            post_json(self.url,'/roku-bridge/result',{'id':command['id'],'body':'<player state="pause"/>'})
+        threading.Thread(target=answering,daemon=True).start()
+        with patch.object(relay.urllib.request,'urlopen') as direct:
+            self.assertEqual(relay.roku('/query/media-player'),b'<player state="pause"/>')
+        direct.assert_not_called()
+
+    def test_roku_client_run_once_bridges_state(self):
+        import roku_client
+        calls=[]
+        def roku_fake(url,data=None,method=None,timeout=5):
+            calls.append((url,method or 'GET'))
+            return PLAYER_PAUSED
+        with patch.object(roku_client,'http',side_effect=route_client_http(self.url,roku_fake)):
+            summary=roku_client.run_once(self.url,'test-only','http://192.168.1.100:8060')
+        self.assertEqual(calls,[('http://192.168.1.100:8060/query/media-player','GET')])
+        self.assertEqual(summary['state']['roku'],'pause')
+        self.assertEqual(summary['state']['app_id'],'12')
+        self.assertEqual(summary['state']['position_ms'],42000)
+        self.assertEqual(summary['commands'],0)
+        # The relay stored the reported state, which no browser client sent.
+        with relay.lock:
+            self.assertTrue(relay.shared['bridge_active'])
+            self.assertEqual(relay.shared['roku'],'pause')
+            self.assertEqual(relay.shared['app_id'],'12')
+            self.assertEqual(relay.shared['app_name'],'Netflix')
+            self.assertEqual(relay.shared['position_ms'],42000)
+            self.assertIsNotNone(relay.shared['last_update'])
+        self.assertTrue(relay.bridge_is_live())
+
+    def test_roku_client_executes_a_queued_play_command_end_to_end(self):
+        import roku_client
+        relay.shared['bridge_only']=True
+        rokus=[]
+        def roku_fake(url,data=None,method=None,timeout=5):
+            rokus.append((url,method or 'GET'))
+            # A real Roku answers a POST keypress with an empty body.
+            return b'' if method=='POST' else PLAYER_PAUSED
+        outcome={}
+        def waiting():
+            try: outcome['body']=relay.roku('/keypress/Play',post=True)
+            except OSError as exc: outcome['error']=str(exc)
+        with patch.object(roku_client,'http',side_effect=route_client_http(self.url,roku_fake)):
+            thread=threading.Thread(target=waiting,daemon=True); thread.start()
+            with relay.lock:
+                for _ in range(300):
+                    if relay.bridge_commands: break
+                    relay.lock.release(); time.sleep(.01); relay.lock.acquire()
+            summary=roku_client.run_once(self.url,'test-only','http://192.168.1.100:8060')
+            thread.join(3)
+        self.assertEqual(outcome.get('error'),None,outcome)
+        self.assertEqual(outcome.get('body'),b'')
+        self.assertTrue(any(url.endswith('/keypress/Play') and method=='POST' for url,method in rokus),rokus)
+        self.assertEqual(summary['commands'],1)
+        self.assertEqual(summary['executed'][0]['path'],'/keypress/Play')
+        self.assertIsNone(summary['executed'][0]['error'])
+        with relay.lock: self.assertEqual(relay.bridge_commands,[])
+
+    def test_remote_key_event_travels_through_the_bridge(self):
+        import roku_client
+        relay.shared['bridge_only']=True
+        roku=FakeRoku(state='pause')
+        with relay.lock: relay.shared.update(roku='pause',last_update=time.time())
+        outcome={}
+        def send_key():
+            try:
+                outcome['data']=post_json(self.url,'/event',{'action':'key','key':'Play'})
+            except urllib.error.HTTPError as exc:
+                outcome['error']=exc.read().decode(); exc.close()
+        thread=threading.Thread(target=send_key,daemon=True); thread.start()
+        with patch.object(roku_client,'http',side_effect=route_client_http(self.url,roku)):
+            deadline=time.monotonic()+10
+            while time.monotonic()<deadline and thread.is_alive():
+                if relay.bridge_commands:
+                    roku_client.run_once(self.url,'test-only','http://192.168.1.100:8060')
+                else:
+                    time.sleep(.02)
+        thread.join(10)
+        self.assertNotIn('error',outcome,outcome)
+        self.assertTrue(outcome['data']['sent'])
+        self.assertIn(('/keypress/Play','POST'),roku.paths)
+        self.assertEqual(roku.state,'play')
+
+    def test_roku_routes_through_a_live_bridge_when_the_device_is_unreachable(self):
+        # No ROKU_BRIDGE_ONLY: the relay is at home but the TV address is wrong,
+        # and a bridge client is still reporting, so ECP must follow the bridge.
+        with relay.lock:
+            relay.shared['bridge_only']=False
+            relay.bridge_last_seen=time.monotonic()
+        def answering():
+            with relay.lock:
+                for _ in range(200):
+                    if relay.bridge_commands: break
+                    relay.lock.release(); time.sleep(.01); relay.lock.acquire()
+                command=relay.bridge_commands[0]
+            post_json(self.url,'/roku-bridge/result',{'id':command['id'],'body':'<player state="play"/>'})
+        threading.Thread(target=answering,daemon=True).start()
+        with patch.object(relay,'direct_roku_reachable',return_value=False),patch.object(relay.urllib.request,'urlopen') as direct:
+            self.assertEqual(relay.roku('/query/media-player'),b'<player state="play"/>')
+        direct.assert_not_called()
+
+    def test_roku_stays_direct_when_the_device_answers(self):
+        with relay.lock:
+            relay.bridge_last_seen=time.monotonic()
+        with patch.object(relay,'direct_roku_reachable',return_value=True),patch.object(relay,'bridge_roku') as bridged:
+            with patch.object(relay.urllib.request,'urlopen') as direct:
+                direct.return_value.__enter__.return_value.read.return_value=b'<player state="play"/>'
+                self.assertEqual(relay.roku('/query/media-player'),b'<player state="play"/>')
+        bridged.assert_not_called()
+
+    def test_bridge_liveness_expires_after_ten_seconds(self):
+        relay.shared['bridge_only']=True
+        with relay.lock: relay.bridge_last_seen=time.monotonic()
+        self.assertTrue(relay.bridge_is_live())
+        self.assertFalse(relay.bridge_is_live(now=relay.bridge_last_seen+relay.BRIDGE_FRESH_S+1))
+
+    def test_sync_reports_bridge_state(self):
+        self.request('/roku-bridge/state',{'roku':'play','app_id':'12','position_ms':5000}).close()
+        with self.request('/sync') as response: data=json.load(response)
+        self.assertTrue(data['bridge_active'])
+        self.assertEqual(data['roku'],'play')
+        self.assertEqual(data['position_ms'],5000)
+
+    def test_bridge_command_endpoint_requires_a_connected_client(self):
+        relay.shared['bridge_only']=True
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.request('/roku-bridge/command',{'path':'/keypress/Play','post':True})
+        self.assertEqual(e.exception.code,409); e.exception.close()
+        for body in ({'path':'keypress/Play'},{'path':'/'+'x'*600},{}):
+            with self.assertRaises(urllib.error.HTTPError) as e:self.request('/roku-bridge/command',body)
+            self.assertEqual(e.exception.code,400,body); e.exception.close()
+
+    def test_sample_paused_direct_works_through_the_bridge_end_to_end(self):
+        import roku_client
+        relay.shared['bridge_only']=True
+        roku=FakeRoku()
+        with relay.lock: relay.shared.update(roku='pause',last_update=time.time(),sample=None)
+        # The relay's sample request is served by a bridge client cycle that
+        # talks to a fake Roku. No roku_dashboard.py is involved.
+        outcome={}
+        def relay_call():
+            try:
+                outcome['data']=post_json(self.url,'/sample',{})
+            except urllib.error.HTTPError as exc:
+                outcome['error']=exc.read().decode(); exc.close()
+        thread=threading.Thread(target=relay_call,daemon=True); thread.start()
+        with patch.object(roku_client,'http',side_effect=route_client_http(self.url,roku)):
+            deadline=time.monotonic()+10
+            while time.monotonic()<deadline and thread.is_alive():
+                if relay.bridge_commands:
+                    roku_client.run_once(self.url,'test-only','http://192.168.1.100:8060')
+                else:
+                    time.sleep(.02)
+        thread.join(10)
+        self.assertNotIn('error',outcome,outcome)
+        self.assertEqual(outcome['data']['after'],'43300 ms')
+        self.assertTrue(outcome['data']['sample_id'])
+        toggles=[p for p,m in roku.paths if p=='/keypress/Play']
+        self.assertEqual(len(toggles),2)
+        with relay.lock:
+            self.assertEqual(relay.shared['sample']['position_ms'],43300)
+            self.assertEqual(relay.shared['roku'],'pause')
+
+    def test_sample_paused_direct_samples_through_the_bridge(self):
+        relay.shared['bridge_only']=True
+        states=iter([PLAYER_PAUSED,PLAYER_PLAYING,PLAYER_PAUSED_AFTER])
+        calls=[]
+        def fake(path,post=False):
+            calls.append((path,post))
+            if post: return b''
+            return next(states,PLAYER_PAUSED_AFTER)
+        with relay.lock:
+            relay.shared.update(roku='pause',last_update=time.time(),sample=None)
+        with patch.object(relay,'roku',side_effect=fake),patch.object(relay.time,'sleep'):
+            with self.request('/sample',{}) as response:
+                data=json.load(response)
+        self.assertEqual(data['after'],'43500 ms')
+        self.assertTrue(data['sample_id'])
+        self.assertEqual([p for p,post in calls if post],['/keypress/Play','/keypress/Play'])
+        with relay.lock:
+            self.assertEqual(relay.shared['sample']['position_ms'],43500)
+            self.assertEqual(relay.shared['roku'],'pause')
+
+    def test_sample_still_uses_the_local_dashboard_first(self):
+        with relay.lock: relay.shared.update(roku='pause',last_update=time.time(),sample=None)
+        dashboard={'after':'12345 ms','timings':[{'operation':'toggle','round_trip_ms':30,'received_at_ms':1000},{'operation':'toggle','round_trip_ms':40,'received_at_ms':1240}]}
+        def fake(request,timeout=9):
+            if not request.full_url.endswith('/sample-paused'):
+                return REAL_URLOPEN(request,timeout=timeout)
+            return io.BytesIO(json.dumps(dashboard).encode())
+        with patch.object(relay.urllib.request,'urlopen',side_effect=fake),patch.object(relay,'sample_paused_direct') as direct:
+            with self.request('/sample',{}) as response: data=json.load(response)
+        direct.assert_not_called()
+        self.assertEqual(data['after'],'12345 ms')
+        with relay.lock:
+            self.assertEqual(relay.shared['sample']['position_ms'],12345)
+            self.assertEqual(relay.shared['roku_toggle_ms'],35)
+            self.assertEqual(relay.shared['roku_state_transition_ms'],240)
+
+    def test_sample_falls_back_to_direct_when_dashboard_is_absent(self):
+        with relay.lock: relay.shared.update(roku='pause',last_update=time.time(),sample=None)
+        direct={'before':'1 ms','after':'99999 ms','timings':[]}
+        def fake(request,timeout=9):
+            if not request.full_url.endswith('/sample-paused'):
+                return REAL_URLOPEN(request,timeout=timeout)
+            raise urllib.error.URLError('connection refused')
+        with patch.object(relay.urllib.request,'urlopen',side_effect=fake),patch.object(relay,'sample_paused_direct',return_value=direct) as mocked:
+            with self.request('/sample',{}) as response: data=json.load(response)
+        mocked.assert_called_once_with()
+        self.assertEqual(data['after'],'99999 ms')
+
+    def test_sample_direct_reports_a_roku_that_is_not_paused(self):
+        relay.shared['bridge_only']=True
+        with relay.lock: relay.shared.update(roku='pause',last_update=time.time(),sample=None)
+        with patch.object(relay,'roku',return_value=PLAYER_PLAYING),patch.object(relay.time,'sleep'):
+            with self.assertRaises(urllib.error.HTTPError) as e:self.request('/sample',{})
+        self.assertEqual(e.exception.code,409); e.exception.close()
+
+    def test_auto_select_presses_select_for_youtube(self):
+        calls=[]
+        def fake(path,post=False):
+            calls.append((path,post))
+            return b'<player state="close"><plugin id="837" name="YouTube"/></player>' if not post else b''
+        with relay.lock: relay.shared['title_id']='dQw4w9WgXcQ'
+        with patch.object(relay,'roku',side_effect=fake),patch.object(relay.time,'sleep'):
+            self.assertTrue(relay.auto_select_after_launch('dQw4w9WgXcQ','837'))
+        self.assertEqual([p for p,post in calls if post],['/keypress/Select'])
+
+    def test_auto_select_presses_select_for_youtube_stop_state(self):
+        calls=[]
+        def fake(path,post=False):
+            calls.append((path,post))
+            return b'<player state="stop"><plugin id="837"/><position>0 ms</position></player>' if not post else b''
+        with relay.lock: relay.shared['title_id']='dQw4w9WgXcQ'
+        with patch.object(relay,'roku',side_effect=fake),patch.object(relay.time,'sleep'):
+            self.assertTrue(relay.auto_select_after_launch('dQw4w9WgXcQ','837'))
+        self.assertEqual([p for p,post in calls if post],['/keypress/Select'])
+
+    def test_launch_passes_app_id_to_auto_select(self):
+        calls=[]
+        def fake(path,post=False):
+            calls.append((path,post))
+            return (b'<player state="close"><plugin id="837" name="YouTube"/></player>' if post else b'<active-app><app id="12"/></active-app>')
+        with patch.object(relay,'roku',side_effect=fake),patch.object(relay,'auto_select_after_launch') as auto,patch.object(relay,'schedule_launch_recovery'):
+            self.assertEqual(self.request('/event',{'action':'title','title_id':'dQw4w9WgXcQ','app':'youtube'}).status,202)
+            for _ in range(200):
+                with relay.lock:
+                    if relay.shared['launch_status'] not in (None,'sending'): break
+                time.sleep(.01)
+        self.assertEqual(auto.call_args_list,[call('dQw4w9WgXcQ','837')])
 
     def test_package_script_builds_expected_zip(self):
         import subprocess, zipfile

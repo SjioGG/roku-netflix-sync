@@ -1,0 +1,37 @@
+# Relay for the Roku + Chrome sync room, run on a cloud host.
+#
+#   SYNC_TOKEN=pick-a-room-token docker compose up -d
+#
+# The home network runs `roku_client.py` against this relay; the relay never
+# reaches the Roku directly (ROKU_BRIDGE_ONLY routes ECP through the bridge).
+services:
+  sync-server:
+    build: .
+    image: roku-netflix-sync-server
+    container_name: roku-sync-server
+    restart: unless-stopped
+    ports:
+      - "8766:8766"
+    environment:
+      SYNC_HOST: "0.0.0.0"
+      SYNC_PORT: "8766"
+      # Room token. Required: a relay without one would accept any caller.
+      SYNC_TOKEN: "${SYNC_TOKEN:?set SYNC_TOKEN to the room token}"
+      # Every Roku command goes through the home bridge client.
+      ROKU_BRIDGE_ONLY: "1"
+      # The Roku address as seen from the home network, used by roku_client.py.
+      ROKU_URL: "${ROKU_URL:-http://192.168.1.100:8060}"
+    # The relay is stateless; a read-only root filesystem is enough.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request,os;a=urllib.request.Request('http://127.0.0.1:8766/sync',headers={'Authorization':'Bearer '+os.environ['SYNC_TOKEN']});urllib.request.urlopen(a,timeout=2)"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

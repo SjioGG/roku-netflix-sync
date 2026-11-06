@@ -10,6 +10,7 @@ Tracked in Linear under **Beeros (`BEE`) → `Build: Software`**:
 - **Browser-to-Browser Peer Mode:** [BEE-228: Add Roku-less browser-to-browser Master/Slave sync mode with baton passing](https://linear.app/beeros/issue/BEE-228)
 - **Multi-App Streaming Support:** [BEE-229: Add YouTube, Plex, and universal HTML5 streaming app support](https://linear.app/beeros/issue/BEE-229)
 - **Roku Load Readiness:** [BEE-230: Harden Roku load readiness (60s patience, auto-retry, pre-start settle)](https://linear.app/beeros/issue/BEE-230)
+- **Cloud Relay & Roku Bridge:** [BEE-231: Host the relay in the cloud with a home-network Roku bridge client](https://linear.app/beeros/issue/BEE-231)
 
 ---
 
@@ -63,6 +64,8 @@ Because Netflix enforces Widevine / PlayReady DRM on video streams, rebroadcasti
 ### A. QoL Features & Edge Cases ([BEE-219](https://linear.app/beeros/issue/BEE-219/roku-netflix-sync-add-qol-sync-features-auto-episode-menu-select-skip))
 - **Auto-Advance Past Roku Episode Menu on Launch** (implemented):
   When Chrome opens a new `/watch/<id>`, Roku `/launch/12?contentID=<id>&mediaType=episode` sometimes lands on the episode overview screen ("Play" button highlighted) instead of starting playback. `auto_select_after_launch()` waits a 1.2 s settle delay, then sends one `/keypress/Select` when Roku reports `close`/`stop`, or `play` at `< 1000 ms`. The check is skipped if the room has moved on to another title.
+- **YouTube Launch Auto-Select** (implemented):
+  `/launch/837?contentId=<id>` leaves the Roku reporting `<player state="close"><plugin id="837" name="YouTube"/></player>` for about five seconds until `/keypress/Select` arrives, which starts the video immediately. `auto_select_after_launch(title_id, app_id)` now runs for YouTube (`837`) exactly as for Netflix (`12`): `close`/`stop` (or `play` under one second) gets one `Select`, and the launch handler passes the target app id so both paths stay identical.
 - **Click-to-Resync & Passive Drift Badge** (implemented):
   The status badge is clickable on any `/watch/<id>` page. A click pauses Chrome quietly, re-samples Roku and re-runs the full sample → align → scheduled-start sequence, so a mid-episode buffer stall does not need a page reload. When another Chrome client reports telemetry for the same title, the badge also shows the passive offset (`Ns behind peer` / `Ns ahead of peer`) once the gap exceeds 1 s.
 - **Multi-Client Telemetry** (implemented):
@@ -118,6 +121,19 @@ When there is no Roku in the room, both viewers use Chrome. `shared['sync_mode']
 - `recover_stalled_launch()` is the second-stage launch recovery, 15 s after the initial settle: a Roku still in `buffer`, `close` or `stop` gets one `Select`, then a deep-link relaunch if that did not help, and `launch_status` becomes `'recovered'`.
 - When a play arrives while a fresh title is loading, `waitForRokuReady()` polls `/sync` every 750 ms for up to 60 s, showing `Waiting for Roku to finish loading… (Ns left)`, and pauses a Roku that started playing before running the sample and 3 s countdown. A play from an already-paused Roku keeps the original 10 s timeout.
 
+
+### C6. Cloud Relay and Home Roku Bridge ([BEE-231](https://linear.app/beeros/issue/BEE-231))
+The relay can run on a cloud VPS while the Roku stays on the home LAN. `roku_client.py` (stdlib only) is the only hop that touches the TV.
+
+```
+Chrome clients ── HTTPS ──► sync_server.py (cloud, :8766) ◄── bridge ── roku_client.py (home) ── ECP ──► Roku
+```
+
+- **State in**: `POST /roku-bridge/state` (same `Bearer <TOKEN>`) carries `{roku, app_id, app_name, position_ms, roku_poll_ms, error}`. It updates `shared` (`bridge_active`, `last_update`) and publishes a `roku` play/pause event when the state changed outside the suppression window, mirroring `poll_roku`. The reply is `{'ok': True, 'commands': [...]}`.
+- **Commands out**: `roku(path, post)` queues `{id, path, post}` on `bridge_commands` and blocks up to 5 s on `bridge_cond` for `bridge_results[id]`, returning the body as bytes or raising `OSError`. So `/query/media-player`, `/keypress/*`, `/launch/*`, `perform_roku_seek` and `verify_scheduled_start` need no changes. `POST /roku-bridge/result` stores `{id, body, error}` and notifies the waiter; `POST /roku-bridge/command` exposes the same queue for explicit callers.
+- **When the bridge is used**: `ROKU_BRIDGE_ONLY=1` (or `shared['bridge_only']`) always routes through it; otherwise the relay keeps dialling the Roku and falls back to the bridge when a client reported within 10 s (`bridge_is_live`) and `ROKU_URL/query/device-info` does not answer. The reachability probe is cached for 5 s so the 500 ms poller does not pay a timeout each cycle. With a live bridge, `poll_roku` idles and lets the client supply state.
+- **Sampling without the dashboard**: `sample_paused_direct()` runs the double-toggle against `roku()` and `apply_sample_result()` records the sample and timing calibration used by `/clock` and `/schedule-start`. `POST /sample` still tries `127.0.0.1:8765/sample-paused` first, and falls back to the direct sampler when the bridge is in use or the dashboard is unreachable.
+- **Deployment**: `Dockerfile` (`python:3.12-slim`, `SYNC_HOST=0.0.0.0`, `SYNC_PORT=8766`, `ROKU_BRIDGE_ONLY=1`, unprivileged user, healthcheck), `docker-compose.yml` (`SYNC_TOKEN` required, read-only rootfs), `deploy/roku-sync-server.service` (systemd, loopback bind, hardened), and `deploy/com.sjiogg.roku-bridge-client.plist` (launchd `KeepAlive` for the Mac). The relay reads `SYNC_HOST`/`SYNC_PORT` in `__main__`.
 
 ### D. Real-Time Acoustic Echo Cancellation (AEC) for Voice Calls ([BEE-222](https://linear.app/beeros/issue/BEE-222/roku-netflix-sync-build-real-time-acoustic-echo-cancellation-aec-to))
 **The Problem:**
