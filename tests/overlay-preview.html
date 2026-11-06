@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><title>Extension overlay UI test</title><style>body{margin:0;background:#111;color:white;font:16px system-ui;padding:30px}button{background:white;color:white}</style><h1>Extension overlay test fixture</h1><p>This intentionally applies white-on-white page button styling. Extension controls must override it.</p><script>
+window.fixtureErrors=[];window.addEventListener('error',e=>fixtureErrors.push(e.message));window.addEventListener('unhandledrejection',e=>fixtureErrors.push(String(e.reason)));
+window.chrome={runtime:{lastError:null,sendMessage(message,callback){callback({data:{seq:0,roku:'pause',last_update:Date.now()/1000,relay_round_trip_ms:12,roku_poll_ms:11}})}};
+</script><script src="../extension/content.js"></script>

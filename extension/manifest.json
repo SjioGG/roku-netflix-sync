@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Roku Netflix Sync Experiment",
+  "version": "0.3.0",
+  "description": "Experimental playback sync with a private Roku relay.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.netflix.com/*"
+      ],
+      "js": [
+        "player-bridge.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.netflix.com/*",
+        "https://www.youtube.com/*",
+        "https://app.plex.tv/*",
+        "https://*.plex.direct/*",
+        "https://www.primevideo.com/*",
+        "https://www.disneyplus.com/*",
+        "https://play.max.com/*",
+        "https://tv.apple.com/*",
+        "https://www.hulu.com/*",
+        "https://www.twitch.tv/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

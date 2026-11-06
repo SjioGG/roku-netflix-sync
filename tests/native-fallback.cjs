@@ -1,0 +1,10 @@
+const assert=require('assert'),harness=require('./native-harness.cjs');
+let sampleReply;
+const h=harness({handle(m,cb){if(m.type==='sample'){sampleReply=cb;return true}}});
+setImmediate(async()=>{h.messages.length=0;await h.video.play();assert(h.video.paused);assert(sampleReply);
+  await h.timers.find(t=>t.delay===10000).f();await new Promise(setImmediate);
+  assert(!h.video.paused);assert(h.messages.some(m=>m.action==='play'));
+  sampleReply({data:{sample_id:'late'}});await new Promise(setImmediate);
+  assert(!h.messages.some(m=>m.type==='schedule'));
+  console.log('Timed-out sample resumes native play and ignores a late result');
+});

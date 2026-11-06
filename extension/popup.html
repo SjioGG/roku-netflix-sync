@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body{font:14px system-ui;width:290px;padding:10px;background:#171923;color:#fff}
+  label{display:block;margin:12px 0}
+  input{-webkit-text-fill-color:#171923!important;color:#171923!important;color-scheme:light;box-sizing:border-box;width:100%;padding:8px;background:#fff;color:#171923;border:1px solid #65728b;border-radius:4px}
+  button{color:#111827!important;-webkit-text-fill-color:#111827!important;background-color:#f3f4f6!important;color-scheme:light;padding:8px 12px;background:#252f43;color:#fff;border:1px solid #65728b;border-radius:4px}
+  input:focus-visible,button:focus-visible{outline:3px solid #82baff;outline-offset:2px}
+  select{box-sizing:border-box;width:100%;padding:8px;background:#fff;color:#171923;border:1px solid #65728b;border-radius:4px}
+  #baton{margin:-4px 0 12px}
+  small{display:block;margin-top:4px;color:#d3d9e3}
+</style>
+<h3>Roku sync</h3>
+<label><input id="enabled" type="checkbox" checked style="width:auto;margin-right:8px">Enable Roku sync</label>
+<label>Sync mode<select id="syncMode"><option value="roku">Roku + Browser</option><option value="peer">Browser-to-Browser (Master/Slave, No Roku)</option></select></label>
+<button id="baton" type="button">Claim / Pass Master Baton</button>
+<label>Relay URL<input id="server" placeholder="https://your-tunnel.example"></label>
+<label>Room token<input id="token" type="password"></label>
+<label>Additional player trim (ms)<input id="rokuLeadMs" type="number" min="-1000" max="1000" step="1" value="0"><small>Network ping &amp; Roku latency are compensated automatically. Optional manual trim (-1000 to +1000 ms) for player resume speed.</small></label>
+<button id="save">Save</button><p id="status" role="status"></p>
+<p>Playback sync is experimental. Check both players after starting.</p>
+<script src="popup.js"></script>
