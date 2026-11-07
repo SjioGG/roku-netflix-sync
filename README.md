@@ -11,8 +11,8 @@ python3 sync_server.py
 ```
 
 The dashboard is at http://127.0.0.1:8765. The authenticated relay is at
-http://127.0.0.1:8766. The relay prints a room token on startup. Set `SYNC_TOKEN`
-to retain a chosen token across restarts. Keep tokens out of source files.
+http://127.0.0.1:8766. Set `SYNC_TOKEN` to configure the room token (the relay
+never logs the token to stdout/journald). Keep tokens out of source files.
 `ROKU_URL` configures the relay's Roku endpoint; the diagnostic dashboard currently
 uses the original local device address.
 

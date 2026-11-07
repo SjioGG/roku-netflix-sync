@@ -947,7 +947,7 @@ if __name__ == '__main__':
     SYNC_HOST = os.environ.get('SYNC_HOST', '127.0.0.1')
     SYNC_PORT = int(os.environ.get('SYNC_PORT', '8766'))
     threading.Thread(target=poll_roku, daemon=True).start()
-    print('Sync relay: http://%s:%d\nRoom token: %s' % (SYNC_HOST, SYNC_PORT, TOKEN), flush=True)
+    print('Sync relay: http://%s:%d (room token configured; never logged)' % (SYNC_HOST, SYNC_PORT), flush=True)
     if bridge_enabled():
         print('Roku mode: bridge (commands are queued for roku_client.py)', flush=True)
     server = ThreadingHTTPServer((SYNC_HOST, SYNC_PORT), Handler)
