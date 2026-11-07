@@ -27,9 +27,10 @@ jobs:
       - name: Package server release bundle
         run: |
           mkdir -p release-bundle
-          cp sync_server.py roku_client.py roku_dashboard.py dashboard.html README.md ARCHITECTURE.md release-bundle/
+          cp sync_server.py roku_client.py roku_dashboard.py aec_daemon.py dashboard.html README.md ARCHITECTURE.md release-bundle/
           cp dist/roku-netflix-sync-extension.zip release-bundle/
           tar czf build.tar.gz -C release-bundle .
+          tar tzf build.tar.gz | grep -qx './aec_daemon.py' || { echo 'aec_daemon.py missing from build.tar.gz' >&2; exit 1; }
 
       - name: Resolve release tag
         id: tag

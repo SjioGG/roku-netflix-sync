@@ -126,6 +126,97 @@ the last 10 s and the configured `ROKU_URL` does not answer. `POST /sample` uses
 the local dashboard when it is running and falls back to sampling through the
 bridge, so no `roku_dashboard.py` is needed in the cloud.
 
+## Acoustic echo cancellation for calls ([BEE-222](https://linear.app/beeros/issue/BEE-222/roku-netflix-sync-build-real-time-acoustic-echo-cancellation-aec-to))
+
+`aec_daemon.py` removes the Roku soundbar's audio from the MacBook microphone
+during a call. macOS cannot do this itself: the TV is a separate speaker in the
+room, so there is no digital loopback for Messenger's voice processing to
+subtract. The daemon supplies that loopback from the synced Chrome tab.
+
+It is stdlib-only Python 3 (`math`, `cmath`, `array`, `struct`, `wave`,
+`subprocess`, `argparse`) and uses `numpy` / `sounddevice` automatically when
+they are installed.
+
+### 1. Install the virtual audio devices (once)
+
+```sh
+brew install blackhole-2ch
+```
+
+Open **Audio MIDI Setup** and:
+
+1. Create a **Multi-Output Device** containing **MacBook Pro Speakers** and
+   **BlackHole 2ch**. Set it as the system output.
+2. Create an **Aggregate Device** containing **BlackHole 2ch** and
+   **BlackHole 16ch** (or `ZoomAudioDevice` when Zoom has created one).
+
+Then route the audio:
+
+- **Chrome** plays the synced episode into the Multi-Output Device. You still
+  hear it, and BlackHole 2ch receives an exact digital copy as the AEC reference.
+  Lower the Chrome tab volume if the room would otherwise play the episode twice.
+- **`aec_daemon.py --live`** reads **BlackHole 2ch** (reference) and
+  **MacBook Pro Microphone** (near end, which contains the Roku bleed) and writes
+  the cleaned voice to **BlackHole 16ch** / **ZoomAudioDevice**.
+- **Messenger** (or any call app) selects **BlackHole 16ch** / **ZoomAudioDevice**
+  as its microphone.
+
+No headphones are needed, and the TV keeps playing from the Roku soundbar.
+
+### 2. Run the live daemon
+
+```sh
+pip install sounddevice          # or: pip install numpy sounddevice
+python3 aec_daemon.py --list-devices
+python3 aec_daemon.py --live \
+    --ref-device "BlackHole 2ch" \
+    --mic-device "MacBook Pro Microphone" \
+    --out-device "BlackHole 16ch"
+```
+
+The daemon prints the tracked Roku/Chrome lag and the live ERLE every few
+blocks. `--backend ffmpeg` runs the same DSP over `ffmpeg -f avfoundation` pipes
+when `sounddevice` is unavailable; it needs `--ref-index`, `--mic-index` and
+`--out-index` (get the input indices from
+`ffmpeg -f avfoundation -list_devices true -i ""`, and the output index from the
+Audio MIDI Setup output order, since ffmpeg cannot enumerate audiotoolbox
+outputs).
+
+### 3. Verify the pipeline offline
+
+```sh
+python3 aec_daemon.py --selftest
+python3 aec_daemon.py --ref-wav ref.wav --mic-wav mic.wav --out-wav clean.wav
+```
+
+`--selftest` plays a synthetic TV track through a multi-tap room response
+delayed by 185 ms with a near-end speech burst on top, then prints the recovered
+lag and the achieved ERLE. The WAV mode prints the same measurements for your own
+recording pair, which is the quickest way to check a real living-room setup.
+
+### How it works
+
+1. **GCC-PHAT delay tracking** over a ±600 ms window. Normal speakerphone echo
+   arrives within 30 ms, but the Roku and the Chrome tab can be offset by
+   hundreds of milliseconds in either direction, so the correlator searches the
+   whole span and only accepts a new lag when the correlation confidence clears
+   a threshold. It needs about one second of TV audio before the first lock
+   (the correlation frame has to cover the deepest lag it searches), then
+   re-checks every half second; a silent or noisy reference keeps the previous
+   delay.
+2. **NLMS adaptive filter** on the delay-aligned reference, with a step size that
+   starts high for a fast lock and decays to a small steady-state value.
+3. **Double-talk detector** (Geigel bound plus a residual-to-echo ratio test) that
+   freezes the filter while you speak, so your voice is passed through instead of
+   being cancelled as echo.
+4. **Residual echo suppressor** that attenuates the leftover nonlinear
+   soundbar distortion when no near-end speech is present.
+
+`tests/test_aec.py` covers delay recovery at ±180 ms, at least 15 dB of ERLE
+through a multi-tap room response, near-end voice preservation during double
+talk, and the WAV CLI round trip. It passes on a bare `python3` in
+`ubuntu-latest` with no `pip install`.
+
 ## Checks
 
 ```sh
@@ -136,3 +227,6 @@ for test in tests/*.cjs; do node "$test" || break; done
 Python tests exercise real HTTP handler paths against mocked device I/O. JS tests
 exercise extension event/race behavior and the Netflix API bridge in a simulated
 page. They do not establish actual Netflix/DRM or Denmark–Japan playback behavior.
+`tests/test_aec.py` additionally needs only the standard library: it forces the
+pure-Python FFT path even when `numpy` is installed, which is what the CI runner
+uses.

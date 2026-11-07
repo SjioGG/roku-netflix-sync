@@ -135,11 +135,11 @@ Chrome clients ── HTTPS ──► sync_server.py (cloud, :8766) ◄── br
 - **Sampling without the dashboard**: `sample_paused_direct()` runs the double-toggle against `roku()` and `apply_sample_result()` records the sample and timing calibration used by `/clock` and `/schedule-start`. `POST /sample` still tries `127.0.0.1:8765/sample-paused` first, and falls back to the direct sampler when the bridge is in use or the dashboard is unreachable.
 - **Deployment**: `Dockerfile` (`python:3.12-slim`, `SYNC_HOST=0.0.0.0`, `SYNC_PORT=8766`, `ROKU_BRIDGE_ONLY=1`, unprivileged user, healthcheck), `docker-compose.yml` (`SYNC_TOKEN` required, read-only rootfs), `deploy/roku-sync-server.service` (systemd, loopback bind, hardened), and `deploy/com.sjiogg.roku-bridge-client.plist` (launchd `KeepAlive` for the Mac). The relay reads `SYNC_HOST`/`SYNC_PORT` in `__main__`.
 
-### D. Real-Time Acoustic Echo Cancellation (AEC) for Voice Calls ([BEE-222](https://linear.app/beeros/issue/BEE-222/roku-netflix-sync-build-real-time-acoustic-echo-cancellation-aec-to))
+### D. Real-Time Acoustic Echo Cancellation (AEC) for Voice Calls — implemented ([BEE-222](https://linear.app/beeros/issue/BEE-222/roku-netflix-sync-build-real-time-acoustic-echo-cancellation-aec-to))
 **The Problem:**
 You are watching on the Roku Smart Soundbar in the room while talking to Japan on Messenger using the MacBook microphone. Because the TV audio comes out of the Roku Soundbar (not the MacBook's own speakers), macOS / Messenger's built-in voice processing does **not** have a digital loopback reference of the TV audio, so it treats loud TV dialogue/explosions as room sound and sends it over the call.
 
-**The Solution Architecture (3 Viable Approaches):**
+**The Solution Architecture:**
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -151,13 +151,15 @@ You are watching on the Roku Smart Soundbar in the room while talking to Japan o
                             │ Far-End Reference x(n)
                             ▼
 ┌────────────────────────────────────────────────────────┐
-│ Python / Rust AEC Daemon on MacBook                    │
-│  - Delay Estimation (Cross-correlation / GCC-PHAT)     │
-│    Continuously tracks the ±300ms drift between        │
-│    Chrome reference and Roku Soundbar room arrival     │
-│  - Adaptive Filter (WebRTC AEC3 / SpeexDSP / NLMS)     │
+│ aec_daemon.py on MacBook (stdlib; numpy/sounddevice    │
+│ optional)                                              │
+│  - Delay Estimation: GCC-PHAT over ±600 ms             │
+│    Tracks the drift between the Chrome reference and   │
+│    the Roku Soundbar's room arrival                     │
+│  - Adaptive Filter: NLMS on x(n - τ)                   │
 │    Subtracts room impulse response * x(n - delay)      │
-│  - Residual Post-Filter (RNNoise / Voice Isolation)    │
+│  - Geigel / residual double-talk detector              │
+│  - Residual echo suppressor (nonlinear tail)           │
 └───────────────────────────┬────────────────────────────┘
                             ▲ Near-End Mic d(n) = Voice + TV Room Echo
 ┌───────────────────────────┴────────────────────────────┐
@@ -173,7 +175,105 @@ You are watching on the Roku Smart Soundbar in the room while talking to Japan o
 
 1. **Why Local Chrome Reference + Delay-Tracking AEC Works**:
    Because your MacBook already has the exact same Netflix episode open and synced within `< 500 ms` of the Roku Soundbar, routing Chrome's audio output to a silent virtual audio device (`BlackHole 2ch`, `brew install blackhole-2ch`) gives your MacBook a crystal-clear digital reference of the TV track without playing double audio in the room.
-2. **Handling Sync Offset Between Chrome & Roku (`±300 ms`)**:
-   Standard OS echo cancellers assume a fixed `< 50 ms` hardware delay between speaker and mic. Because Roku and Chrome can differ by `100–400 ms`, the AEC daemon runs a **sliding-window GCC-PHAT cross-correlator** (over a `±600 ms` buffer) every second to lock onto the exact acoustic lag \(\tau\) between the Chrome reference buffer and the MacBook mic, then feeds the delay-aligned reference \(x(t - \tau)\) into **WebRTC AudioProcessing (`aec3`)** or **SpeexDSP** before outputting to a second virtual device selected in Messenger.
+2. **Handling Sync Offset Between Chrome & Roku (`±500 ms`)**:
+   Standard OS echo cancellers assume a fixed `< 50 ms` hardware delay between speaker and mic. Because Roku and Chrome can differ by hundreds of milliseconds in either direction, the AEC daemon runs a **sliding-window GCC-PHAT cross-correlator** (over a `±600 ms` buffer) every half second to lock onto the exact acoustic lag \(\tau\) between the Chrome reference buffer and the MacBook mic, then feeds the delay-aligned reference \(x(t - \tau)\) into the NLMS adaptive filter before outputting to a second virtual device selected in Messenger. The "WebRTC AEC3 / SpeexDSP" variant was not used: both assume a short, fixed hardware delay and would need an explicit delay-compensation ring buffer anyway, so the engine implements the delay tracker, filter, double-talk detector and residual suppressor directly and stays stdlib-only.
 3. **Hardware Zero-Drift Alternative**:
    If you want zero drift estimation, a $15 USB audio capture dongle fed from the TV's optical/aux audio-out provides the exact sample-accurate Roku audio into the MacBook as the AEC reference channel.
+
+**Implemented engine (`aec_daemon.py`, stdlib only):**
+Standard OS echo cancellers assume a fixed `< 50 ms` speaker-to-mic delay, and none of them can see the Roku's soundbar at all. `aec_daemon.py` implements the three stages above directly so it runs from a bare `python3` on the Mac and on the CI runner, with `numpy` and `sounddevice` used automatically when present.
+
+```
+Chrome (synced tab) ─► Multi-Output Device ─┬─► MacBook Speakers (you hear it)
+                                            └─► BlackHole 2ch ──┐  reference x(n)
+                                                                 ▼
+                                              ┌────────────────────────────────┐
+MacBook Pro Microphone ──► d(n) = voice + TV ─┤ aec_daemon.py --live           │
+                                              │  1. GCC-PHAT lag (radix-2 FFT) │
+                                              │  2. NLMS + Geigel/residual DTD │
+                                              │  3. Residual echo suppressor   │
+                                              └───────────────┬────────────────┘
+                                                              ▼ e(n) clean voice
+                                              BlackHole 16ch / ZoomAudioDevice
+                                                              ▼
+                                              Messenger microphone input
+```
+
+1. **`estimate_delay_samples(ref_frame, mic_frame, max_lag_samples)`** computes
+   \(\tau\) over `[-max_lag, +max_lag]` with
+   $$R_{xy}(\tau) = \mathcal{F}^{-1}\left[\frac{X(\omega)Y^*(\omega)}{|X(\omega)Y^*(\omega)| + \epsilon}\right]$$
+   using an in-place iterative radix-2 Cooley-Tukey FFT/IFFT on a power-of-two
+   buffer (`numpy.fft.rfft`/`irfft` on the fast path). The peak is refined with a
+   parabolic fit and then scored with a normalised cross-correlation to produce
+   the confidence the caller gates on. The convention is `mic[n] ≈ ref[n - τ]`,
+   so a **positive** lag means the Roku soundbar is behind Chrome and a
+   **negative** lag means Chrome is behind the Roku. ±600 ms covers the observed
+   drift in both directions with room to spare.
+2. **`AcousticEchoCanceller`** keeps a reference ring buffer of
+   `max_delay_ms + filter_length` samples (plus the GCC frame), re-estimates the
+   lag every `delay_update_s` (0.5 s) only while the reference is above the
+   silence floor and double talk is not active, and only accepts a new lag whose
+   confidence clears `delay_confidence` (0.4). The correlation frame is 1.5× the
+   search span so every candidate lag still overlaps the reference by a third of
+   the frame; below 16 kHz it is decimated before the FFT and the winning lag is
+   refined at the native rate. This sets the first lock at about one second of
+   TV audio, after which updates run on a rolling window. A jump of
+   `delay_reset_samples` samples blanks the taps, so a re-lock never drags a
+   stale room response into the new alignment. The delay-aligned reference vector
+   feeds a 256-tap NLMS filter:
+   \(\hat{y}(n) = \mathbf{w}^T\mathbf{x}(n-\tau)\), \(e(n) = d(n) - \hat{y}(n)\),
+   with \(\mu\) starting at 0.5 and decaying toward `mu_min` so the initial lock is
+   fast and the steady-state misadjustment is small.
+3. **Double-talk detector**: a Geigel bound
+   `|d(n)| > ξ · ||h||₁ · ||x(n)||₂` (which holds from silence, so it never
+   blocks the first convergence) plus, once a residual-to-microphone ratio proves
+   the filter has genuinely converged, a test that fires when the residual climbs
+   back toward the predicted echo power. While triggered, the filter is frozen and
+   the suppressor is bypassed, so the far-end caller hears the user's voice.
+4. **Residual echo suppressor** applies a soft Wiener-style gate
+   \(g = \frac{e^2/\hat{y}^2}{e^2/\hat{y}^2 + k}\) to the output only when no
+   near-end speech is present, which cleans up the nonlinear soundbar distortion
+   an NLMS filter cannot model.
+5. **Stats**: `process_frame` returns the clean block plus `delay_ms`,
+   `confidence`, `erle_db` (block-smoothed
+   \(10\log_{10}\sum d^2/\sum e^2\)), `erle_total_db`, `double_talk`,
+   `filter_energy`, `mu` and `latency_ms` (non-zero only in the Chrome-behind-Roku
+   case, where the output must be held back by the lag).
+6. **CLI modes**: `--list-devices` (sounddevice, else `ffmpeg -f avfoundation
+   -list_devices`, else `system_profiler SPAudioDataType`),
+   `--ref-wav/--mic-wav/--out-wav` (16-bit PCM in, printed delay and ERLE, 16-bit
+   PCM out), `--live` (sounddevice streams, or `--backend ffmpeg` over
+   `avfoundation` pipes), and `--selftest` (synthetic TV track + multi-tap room
+   response + 185 ms offset + near-end burst, printing recovered lag and ERLE).
+
+**Measured macOS setup** (no headphones, TV keeps playing):
+- `brew install blackhole-2ch`, then in Audio MIDI Setup a **Multi-Output Device**
+  (MacBook Pro Speakers + BlackHole 2ch) as the system output so Chrome's audio is
+  both audible and captured digitally, and an **Aggregate Device**
+  (BlackHole 2ch + BlackHole 16ch) as the daemon's device set.
+- Chrome's synced episode plays into the Multi-Output Device; the daemon reads
+  BlackHole 2ch as the reference and the MacBook Pro Microphone as the near end,
+  and writes the cleaned voice to BlackHole 16ch / `ZoomAudioDevice`, which the
+  call app selects as its microphone.
+- Chrome's tab volume can be lowered (or the tab left out of the room mix entirely
+  and the Roku left to make the room sound) without losing the reference.
+
+**Verification** (`tests/test_aec.py`, no `pip install` needed):
+- `test_gcc_phat_recovers_positive_and_negative_tv_drift` — ±180 ms and −120 ms
+  recovered within ±2 samples through a room response.
+- `test_nlms_cancels_room_echo_by_at_least_15db` — ≥15 dB steady-state ERLE with
+  the room impulse `[0.7, -0.25, 0.12, ...]` at a +150 ms offset.
+- `test_tracks_a_lag_near_the_search_limit` — a ±500 ms offset at 8 kHz and
+  16 kHz is tracked exactly. This guards the correlation-window length, which
+  silently broke offsets beyond ~250 ms when the window was shorter than the
+  search span.
+- `test_double_talk_preserves_near_end_voice` — the burst survives, the detector
+  fires, weights stay bounded and cancellation resumes afterwards.
+- `test_wav_cli_round_trip` — the CLI pipeline writes a WAV with lower echo energy
+  than the input mic.
+- `StdlibPathTest` forces `aec._np = None` so the pure-Python FFT is exercised
+  even on a machine that has numpy, which is the GitHub Actions configuration.
+
+**Measured on this machine** (stdlib path, no numpy): 5x realtime at 16 kHz and
+9x at 8 kHz, 73–79 dB ERLE after four seconds of synthetic TV audio, exact lag
+recovery at ±500 ms, and about 3% of one core for the periodic delay re-estimate.

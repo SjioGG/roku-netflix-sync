@@ -819,4 +819,13 @@ class RelayTest(unittest.TestCase):
         with open(os.path.join(os.path.dirname(script),'..','extension','manifest.json')) as handle:
             self.assertEqual(json.load(handle)['manifest_version'],3)
 
+    def test_release_workflow_ships_the_aec_daemon(self):
+        """The release bundle must keep carrying the AEC engine."""
+        workflow=os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','.github','workflows','release.yml')
+        with open(workflow) as handle:
+            text=handle.read()
+        bundle=text.split('Package server release bundle',1)[1].split('Resolve release tag',1)[0]
+        self.assertIn('aec_daemon.py',bundle)
+        self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(workflow),'..','..','aec_daemon.py')))
+
 if __name__=='__main__': unittest.main()
