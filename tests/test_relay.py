@@ -84,7 +84,7 @@ class RelayTest(unittest.TestCase):
         cls.server.shutdown();cls.server.server_close()
     def setUp(self):
         with relay.lock:
-            relay.shared.update(title_id=None, launch_status=None, launch_started=None, roku='pause',last_update=time.time(), sample=None, scheduled=None, generation=0, sync_mode='roku', master_client_id=None, master_state=None, app_id=None, app_name=None, clients={}, bridge_active=False, bridge_only=False)
+            relay.shared.update(title_id=None, launch_status=None, launch_started=None, roku='pause',last_update=time.time(), sample=None, scheduled=None, generation=0, sampling=False, sync_mode='roku', master_client_id=None, master_state=None, app_id=None, app_name=None, clients={}, bridge_active=False, bridge_only=False)
         relay.reset_bridge()
         relay.suppress_until = 0
     def request(self,path,body=None,auth=True):
@@ -828,4 +828,209 @@ class RelayTest(unittest.TestCase):
         self.assertIn('aec_daemon.py',bundle)
         self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(workflow),'..','..','aec_daemon.py')))
 
+
+DEVICE_INFO_XML = b'''<?xml version="1.0" encoding="UTF-8" ?>
+<device-info>
+  <udn>00000000-0000-4000-8000-000000000001</udn>
+  <serial-number>EXAMPLE000001</serial-number>
+  <vendor-name>Roku</vendor-name>
+  <model-name>Roku Smart Soundbar</model-name>
+  <model-number>9101X</model-number>
+  <is-tv>false</is-tv>
+  <network-type>wifi</network-type>
+  <network-name>Example Wi-Fi</network-name>
+  <friendly-device-name>Roku Smart Soundbar</friendly-device-name>
+  <friendly-model-name>Roku Smart Soundbar</friendly-model-name>
+  <user-device-name>Living Room TV</user-device-name>
+  <user-device-location>Bedroom</user-device-location>
+  <software-version>15.2.4</software-version>
+  <power-mode>PowerOn</power-mode>
+  <supports-airplay>true</supports-airplay>
+</device-info>
+'''
+
+ACTIVE_APP_XML = b'''<?xml version="1.0" encoding="UTF-8" ?>
+<active-app><app id="837" type="appl" version="9.21.12">YouTube</app></active-app>
+'''
+
+TV_DEVICE_INFO_XML = b'''<?xml version="1.0" encoding="UTF-8" ?>
+<device-info>
+  <vendor-name>Roku</vendor-name>
+  <model-name>Roku Ultra</model-name>
+  <model-number>4802X</model-number>
+  <is-tv>true</is-tv>
+  <network-type>wired</network-type>
+  <network-name>home-lan</network-name>
+  <user-device-name>Office Roku</user-device-name>
+  <supports-airplay>false</supports-airplay>
+</device-info>
+'''
+
+
+class RokuDiscoveryTest(unittest.TestCase):
+    """``roku_client`` AirPlay-style device parsing and LAN discovery."""
+
+    def setUp(self):
+        import roku_client
+        self.client = roku_client
+
+    def test_parse_device_info_maps_every_field(self):
+        device = self.client.parse_device_info(DEVICE_INFO_XML, 'http://192.168.1.100:8060',
+                                               latency_ms=14, active_app='YouTube')
+        self.assertEqual(device['url'], 'http://192.168.1.100:8060')
+        self.assertEqual(device['name'], 'Living Room TV')
+        self.assertEqual(device['location'], 'Bedroom')
+        self.assertEqual(device['model_name'], 'Roku Smart Soundbar')
+        self.assertEqual(device['model_number'], '9101X')
+        self.assertEqual(device['vendor_name'], 'Roku')
+        self.assertEqual(device['serial_number'], 'EXAMPLE000001')
+        self.assertEqual(device['udn'], '00000000-0000-4000-8000-000000000001')
+        self.assertEqual(device['network_name'], 'Example Wi-Fi')
+        self.assertEqual(device['network_type'], 'wifi')
+        self.assertEqual(device['power_mode'], 'PowerOn')
+        self.assertEqual(device['software_version'], '15.2.4')
+        self.assertTrue(device['supports_airplay'])
+        self.assertFalse(device['is_tv'])
+        self.assertTrue(device['is_soundbar'])
+        self.assertEqual(device['active_app'], 'YouTube')
+        self.assertEqual(device['latency_ms'], 14)
+        self.assertEqual(device['label'], 'Living Room TV (Bedroom)')
+
+    def test_parse_device_info_label_skips_a_location_already_in_the_name(self):
+        xml = DEVICE_INFO_XML.replace(b'<user-device-name>Living Room TV</user-device-name>',
+                                      b'<user-device-name>Bedroom Roku</user-device-name>')
+        device = self.client.parse_device_info(xml, 'http://192.168.1.100:8060')
+        self.assertEqual(device['label'], 'Bedroom Roku')
+        self.assertIsNone(device['latency_ms'])
+        self.assertIsNone(device['active_app'])
+
+    def test_parse_device_info_falls_back_on_a_minimal_document(self):
+        device = self.client.parse_device_info(b'<device-info/>', 'http://10.0.0.9:8060')
+        self.assertEqual(device['name'], 'Roku Device')
+        self.assertEqual(device['model_name'], 'Roku')
+        self.assertEqual(device['location'], '')
+        self.assertEqual(device['vendor_name'], 'Roku')
+        self.assertEqual(device['power_mode'], 'PowerOn')
+        self.assertFalse(device['supports_airplay'])
+        self.assertFalse(device['is_tv'])
+        self.assertFalse(device['is_soundbar'])
+        self.assertEqual(device['label'], 'Roku Device')
+
+    def test_parse_device_info_survives_malformed_xml(self):
+        device = self.client.parse_device_info(b'not xml at all', 'http://10.0.0.9:8060')
+        self.assertEqual(device['url'], 'http://10.0.0.9:8060')
+        self.assertEqual(device['name'], 'Roku Device')
+
+    def test_parse_device_info_detects_a_tv_and_a_soundbar(self):
+        tv = self.client.parse_device_info(TV_DEVICE_INFO_XML, 'http://192.168.1.50:8060')
+        self.assertTrue(tv['is_tv'])
+        self.assertFalse(tv['is_soundbar'])
+        self.assertFalse(tv['supports_airplay'])
+        self.assertEqual(tv['network_type'], 'wired')
+
+    def _discovery_transport(self, answering):
+        from urllib.parse import urlsplit
+
+        def fake_http(url, data=None, method=None, timeout=5, token=None, content_type=None):
+            parts = urlsplit(url)
+            base = '%s://%s' % (parts.scheme, parts.netloc)
+            if base not in answering:
+                raise OSError('no route to host')
+            if url.endswith('/query/device-info'):
+                return answering[base]
+            if url.endswith('/query/active-app'):
+                return ACTIVE_APP_XML
+            raise AssertionError('unexpected discovery path ' + url)
+        return fake_http
+
+    def test_discover_probes_seeds_and_reports_latency_and_active_app(self):
+        answering = {'http://192.168.1.100:8060': DEVICE_INFO_XML,
+                     'http://192.168.1.50:8060': TV_DEVICE_INFO_XML}
+        seeds = ['http://192.168.1.50:8060', '192.168.1.100:8060']
+        with patch.dict(os.environ, {'ROKU_URL': 'http://192.168.1.100:8060'}), \
+                patch.object(self.client, 'http', side_effect=self._discovery_transport(answering)):
+            discovery = self.client.discover_roku_devices(seed_urls=seeds, include_arp=False,
+                                                         include_ssdp=False)
+        devices = discovery['devices']
+        self.assertEqual(discovery['scanned_candidates'], 2)
+        self.assertEqual(len(devices), 2)
+        # The configured ROKU_URL stays first regardless of latency.
+        self.assertEqual(devices[0]['url'], 'http://192.168.1.100:8060')
+        self.assertEqual(devices[0]['active_app'], 'YouTube')
+        self.assertIsNotNone(devices[0]['latency_ms'])
+        self.assertGreaterEqual(devices[0]['latency_ms'], 0)
+        self.assertEqual(devices[1]['url'], 'http://192.168.1.50:8060')
+        self.assertEqual(devices[1]['name'], 'Office Roku')
+
+    def test_discover_returns_an_empty_list_when_nothing_answers(self):
+        with patch.dict(os.environ, {'ROKU_URL': 'http://192.168.1.100:8060'}), \
+                patch.object(self.client, 'http', side_effect=OSError('timed out')):
+            discovery = self.client.discover_roku_devices(seed_urls=['http://10.0.0.4:8060'],
+                                                         include_arp=False, include_ssdp=False)
+        self.assertEqual(discovery['devices'], [])
+        self.assertEqual(discovery['scanned_candidates'], 2)
+
+    def test_discover_deduplicates_and_normalises_candidate_urls(self):
+        seen = []
+
+        def fake_http(url, data=None, method=None, timeout=5, token=None, content_type=None):
+            seen.append(url)
+            return DEVICE_INFO_XML if url.endswith('/device-info') else ACTIVE_APP_XML
+
+        with patch.dict(os.environ, {'ROKU_URL': 'http://192.168.1.100:8060'}), \
+                patch.object(self.client, 'http', side_effect=fake_http):
+            discovery = self.client.discover_roku_devices(
+                seed_urls=['192.168.1.100:8060', 'http://192.168.1.100:8060/'],
+                include_arp=False, include_ssdp=False)
+        self.assertEqual(discovery['scanned_candidates'], 1)
+        self.assertEqual(len(discovery['devices']), 1)
+        # Bare hosts get the ECP port and no trailing slash.
+        self.assertTrue(all(u.startswith('http://192.168.1.100:8060/query/') for u in seen), seen)
+
+    def test_arp_candidates_skip_incomplete_entries_and_public_addresses(self):
+        output = ('? (192.168.1.100) at 10:59:32:dc:9d:2f on en0 ifscope [ethernet]\n'
+                  '? (192.168.1.20) at (incomplete) on en0 ifscope [ethernet]\n'
+                  '? (10.0.0.7) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n'
+                  '? (172.16.4.4) at 11:22:33:44:55:66 on en0 ifscope [ethernet]\n'
+                  '? (172.32.4.4) at 11:22:33:44:55:67 on en0 ifscope [ethernet]\n'
+                  '? (8.8.8.8) at 00:11:22:33:44:55 on en0 ifscope [ethernet]\n')
+
+        class Result:
+            stdout = output
+
+        found = self.client.arp_candidates(runner=lambda *a, **k: Result())
+        # 172.32.x is outside the RFC 1918 172.16/12 block, so it is skipped.
+        self.assertEqual(found, ['http://192.168.1.100', 'http://10.0.0.7', 'http://172.16.4.4'])
+
+    def test_arp_candidates_survive_a_missing_arp_binary(self):
+        def boom(*args, **kwargs):
+            raise OSError('arp: command not found')
+
+        self.assertEqual(self.client.arp_candidates(runner=boom), [])
+
+    def test_discover_cli_prints_json_and_exits_zero(self):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'roku_client.py')
+        result = subprocess.run([sys.executable, script, '--discover', '--json',
+                                 '--seed-url', 'http://127.0.0.1:1'],
+                                capture_output=True, text=True, timeout=40,
+                                env=dict(os.environ, ROKU_URL='http://127.0.0.1:1'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIn('devices', payload)
+        self.assertIn('scanned_candidates', payload)
+        self.assertIsInstance(payload['devices'], list)
+
+    def test_discover_cli_prints_human_readable_lines(self):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'roku_client.py')
+        result = subprocess.run([sys.executable, script, '--discover',
+                                 '--seed-url', 'http://127.0.0.1:1'],
+                                capture_output=True, text=True, timeout=40,
+                                env=dict(os.environ, ROKU_URL='http://127.0.0.1:1'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Roku device(s)', result.stdout)
+
+
 if __name__=='__main__': unittest.main()
+

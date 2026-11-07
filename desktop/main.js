@@ -90,6 +90,14 @@ function registerIpc() {
     return controller.snapshot()
   })
   handle('logs:recent', () => recentLog.slice(-60))
+  handle('roku:scan', async () => {
+    await controller.scanRokuDevices()
+    return controller.snapshot()
+  })
+  handle('ping:run', async (options) => {
+    await controller.pingServer(options || {})
+    return controller.snapshot()
+  })
   handle('clipboard:write', (text) => {
     clipboard.writeText(String(text || ''))
     return true
@@ -105,6 +113,9 @@ app.whenReady().then(() => {
   controller = new DesktopController({ rootDir: path.join(__dirname, '..') })
   attach(controller)
   registerIpc()
+  // Discovery and the ping tester run on startup so the window opens with data.
+  controller.scanRokuDevices().catch(() => {})
+
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

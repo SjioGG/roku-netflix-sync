@@ -292,6 +292,7 @@ button.secondary:hover:not(:disabled) { background: #212c41; }
 
 button.ghost { background: transparent; color: var(--text-dim); border-color: #26324a; }
 button.ghost:hover:not(:disabled) { color: var(--text); border-color: #35456a; background: rgba(255, 255, 255, 0.03); }
+button.ghost.copied { color: #b9f4dc; border-color: rgba(53, 211, 154, 0.4); background: rgba(53, 211, 154, 0.12); }
 
 button.small { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 
@@ -314,6 +315,21 @@ button.small { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin: 6px 0 20px;
+}
+
+.ping-stats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0 14px;
+}
+
+@media (max-width: 1180px) {
+  .ping-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {
+  .ping-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .stat {
@@ -359,3 +375,125 @@ button.small { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 }
 
 .hidden { display: none !important; }
+
+/* -- AirPlay-style Roku picker ------------------------------------------- */
+.airplay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.airplay-list:empty { display: none; }
+
+.airplay-device {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 11px 13px;
+  border-radius: 12px;
+  border: 1px solid #22304a;
+  background: #0d1320;
+  color: var(--text);
+  font-weight: 500;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.airplay-device:hover { background: #111a2b; border-color: #2d3f60; }
+
+.airplay-device.selected {
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.1);
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.14);
+}
+
+.airplay-icon {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  color: #9dc0ff;
+  background: rgba(79, 140, 255, 0.14);
+  border: 1px solid rgba(79, 140, 255, 0.3);
+}
+
+.airplay-icon svg { display: block; }
+
+.airplay-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+.airplay-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.airplay-name { font-size: 13.5px; font-weight: 650; letter-spacing: -0.005em; }
+
+.location-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #cfe0ff;
+  background: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.airplay-meta {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.airplay-meta .airplay-ready { color: var(--good); }
+
+/* -- RTT sample strip + formula ------------------------------------------ */
+.ping-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 0;
+}
+
+.ping-samples:empty { display: none; }
+
+.ping-sample {
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: #0e1522;
+  border: 1px solid #1c2537;
+}
+
+.ping-sample.best {
+  color: #b9f4dc;
+  background: rgba(53, 211, 154, 0.13);
+  border-color: rgba(53, 211, 154, 0.35);
+}
+
+.formula {
+  margin: 14px 0 0;
+  padding: 13px 15px;
+  border-radius: 11px;
+  background: #0a0f19;
+  border: 1px solid #1a2233;
+  color: #9fb2d0;
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.card.span-2 { grid-column: 1 / -1; }
+
+@media (max-width: 1020px) {
+  .card.span-2 { grid-column: auto; }
+}
+

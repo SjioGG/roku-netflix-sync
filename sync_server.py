@@ -732,44 +732,54 @@ class Handler(BaseHTTPRequestHandler):
                 shared['sampling']=True
                 suppress_until=time.monotonic()+10
                 use_bridge = bridge_enabled() or (bridge_is_live() and not direct_roku_reachable())
+            reply_code = 200
+            reply_payload = None
             try:
                 if use_bridge:
                     # Cloud deployments have no local dashboard; sample directly.
                     try:
                         result=sample_paused_direct()
                     except ValueError as e:
-                        return self.reply(409, {'error':str(e)})
+                        reply_code, reply_payload = 409, {'error':str(e)}
                     except (OSError, urllib.error.URLError, ET.ParseError) as e:
-                        return self.reply(502, {'error':str(e)+'. Check whether the Roku is paused.'})
-                    changed=apply_sample_result(result,generation)
-                    if changed: return self.reply(409, {'error':changed})
-                    return self.reply(200,result)
-                try:
-                    request=urllib.request.Request(DASHBOARD_SAMPLE_URL,data=b'',method='POST')
-                    with urllib.request.urlopen(request,timeout=9) as response: result=json.load(response)
-                except (urllib.error.URLError, OSError) as exc:
-                    # No dashboard on this host: fall back to the direct sampler.
-                    if isinstance(exc, urllib.error.HTTPError):
-                        raise
+                        reply_code, reply_payload = 502, {'error':str(e)+'. Check whether the Roku is paused.'}
+                    else:
+                        changed=apply_sample_result(result,generation)
+                        if changed:
+                            reply_code, reply_payload = 409, {'error':changed}
+                        else:
+                            reply_code, reply_payload = 200, result
+                else:
                     try:
-                        result=sample_paused_direct()
-                    except ValueError as e:
-                        return self.reply(409, {'error':str(e)})
-                    except (OSError, urllib.error.URLError, ET.ParseError) as e:
-                        return self.reply(502, {'error':str(e)+'. Check whether the Roku is paused.'})
-                changed=apply_sample_result(result,generation)
-                if changed: return self.reply(409, {'error':changed})
-                return self.reply(200,result)
+                        request=urllib.request.Request(DASHBOARD_SAMPLE_URL,data=b'',method='POST')
+                        with urllib.request.urlopen(request,timeout=9) as response: result=json.load(response)
+                    except (urllib.error.URLError, OSError) as exc:
+                        # No dashboard on this host: fall back to the direct sampler.
+                        if isinstance(exc, urllib.error.HTTPError):
+                            raise
+                        try:
+                            result=sample_paused_direct()
+                        except ValueError as e:
+                            reply_code, reply_payload = 409, {'error':str(e)}
+                        except (OSError, urllib.error.URLError, ET.ParseError) as e:
+                            reply_code, reply_payload = 502, {'error':str(e)+'. Check whether the Roku is paused.'}
+                    if reply_payload is None:
+                        changed=apply_sample_result(result,generation)
+                        if changed:
+                            reply_code, reply_payload = 409, {'error':changed}
+                        else:
+                            reply_code, reply_payload = 200, result
             except urllib.error.HTTPError as e:
                 try: result=json.load(e)
                 except (ValueError, OSError): result={'error':'Roku sample failed; check the TV.'}
-                return self.reply(e.code,result)
+                reply_code, reply_payload = e.code, result
             except (OSError, urllib.error.URLError, ValueError) as e:
-                return self.reply(502,{'error':str(e)+'. Check whether the Roku is paused.'})
+                reply_code, reply_payload = 502, {'error':str(e)+'. Check whether the Roku is paused.'}
             finally:
                 with lock:
                     shared['sampling']=False
                     suppress_until=time.monotonic()+2
+            return self.reply(reply_code, reply_payload)
         if self.path == '/cancel-start':
             try:
                 length=int(self.headers.get('Content-Length','0'))

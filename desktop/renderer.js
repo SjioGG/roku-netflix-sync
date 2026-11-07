@@ -52,6 +52,8 @@ function browserAdapter() {
     runSelfTest: () => call('POST', '/api/anc/selftest').then(unwrap),
     startBridge: () => call('POST', '/api/bridge/start').then(unwrap),
     stopBridge: () => call('POST', '/api/bridge/stop').then(unwrap),
+    scanRokuDevices: () => call('POST', '/api/roku/scan').then(unwrap),
+    pingServer: (options) => call('POST', '/api/ping', { options: options || {} }).then(unwrap),
     recentLogs: () => call('GET', '/api/logs'),
     copy: async (text) => {
       try {
@@ -123,13 +125,30 @@ const el = {
   serverUrl: $('server-url'),
   roomToken: $('room-token'),
   toggleToken: $('toggle-token'),
+  copyToken: $('copy-token'),
+  tokenSource: $('token-source'),
   rokuUrl: $('roku-url'),
+  scanRoku: $('scan-roku'),
+  rokuDeviceList: $('roku-device-list'),
+  rokuScanSummary: $('roku-scan-summary'),
   configPath: $('config-path'),
   rokuPlayer: $('roku-player'),
   rokuApp: $('roku-app'),
   rokuPosition: $('roku-position'),
   startBridge: $('start-bridge'),
   stopBridge: $('stop-bridge'),
+  pingLive: $('ping-live'),
+  pingJapan: $('ping-japan'),
+  pingMode: $('ping-mode'),
+  pingError: $('ping-error'),
+  pingBest: $('ping-best'),
+  pingOneWay: $('ping-oneway'),
+  pingJitter: $('ping-jitter'),
+  pingOffset: $('ping-offset'),
+  pingRokuOneWay: $('ping-roku-oneway'),
+  pingLead: $('ping-lead'),
+  pingSamples: $('ping-samples'),
+  pingFormula: $('ping-formula'),
   log: $('log'),
   clearLog: $('clear-log'),
 }
@@ -281,6 +300,176 @@ function renderConfig(state) {
   if (active !== el.roomToken) el.roomToken.value = state.config.token || ''
   if (active !== el.rokuUrl) el.rokuUrl.value = state.config.rokuUrl || ''
   el.configPath.textContent = state.configPath || el.configPath.textContent
+  // The badge tells you the token came off disk, not out of a paste a second ago.
+  if (state.tokenFromConfigFile) {
+    el.tokenSource.classList.remove('hidden')
+    el.tokenSource.textContent = 'Loaded from config file'
+  } else {
+    el.tokenSource.classList.add('hidden')
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* AirPlay-style Roku device picker                                          */
+/* ------------------------------------------------------------------------- */
+let renderedDeviceSignature = ''
+
+// Inline icons keep the picker crisp on dark backgrounds and need no font.
+const DEVICE_ICONS = {
+  soundbar: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">'
+    + '<rect x="2" y="9" width="20" height="6" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/>'
+    + '<circle cx="7" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/>'
+    + '<circle cx="17" cy="12" r="1.3" fill="currentColor"/></svg>',
+  tv: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">'
+    + '<rect x="2.5" y="4" width="19" height="13" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.7"/>'
+    + '<path d="M8 21h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+}
+
+function deviceMetaLine(device) {
+  // One line, AirPlay-style: model · network · active app · latency · AirPlay.
+  const parts = []
+  if (device.model_number) parts.push(`${device.model_name} ${device.model_number}`)
+  else if (device.model_name) parts.push(device.model_name)
+  if (device.network_name) {
+    const kind = device.network_type ? (device.network_type.toLowerCase() === 'wifi' ? 'Wi-Fi' : device.network_type) : 'LAN'
+    parts.push(`${kind}: ${device.network_name}`)
+  }
+  if (device.active_app) parts.push(`Active: ${device.active_app}`)
+  if (device.latency_ms !== null && device.latency_ms !== undefined) parts.push(`${device.latency_ms} ms`)
+  if (device.power_mode && device.power_mode !== 'PowerOn') parts.push(device.power_mode)
+  return parts
+}
+
+function renderRokuDevices(state) {
+  const devices = Array.isArray(state.rokuDevices) ? state.rokuDevices : []
+  const current = (state.config && state.config.rokuUrl) || el.rokuUrl.value
+  const signature = JSON.stringify([current, devices.map((device) => [device.url, device.label,
+    device.model_number, device.network_name, device.active_app, device.latency_ms,
+    device.supports_airplay])])
+  if (signature === renderedDeviceSignature) return
+  renderedDeviceSignature = signature
+
+  el.rokuDeviceList.innerHTML = ''
+  for (const device of devices) {
+    const card = document.createElement('button')
+    card.type = 'button'
+    card.className = 'airplay-device' + (device.url === current ? ' selected' : '')
+    card.setAttribute('role', 'option')
+    card.setAttribute('aria-selected', device.url === current ? 'true' : 'false')
+    card.dataset.url = device.url
+    card.dataset.rokuDevice = '1'
+
+    const icon = document.createElement('span')
+    icon.className = 'airplay-icon'
+    icon.innerHTML = device.is_soundbar ? DEVICE_ICONS.soundbar : DEVICE_ICONS.tv
+
+    const body = document.createElement('span')
+    body.className = 'airplay-body'
+
+    const title = document.createElement('span')
+    title.className = 'airplay-title'
+    const name = document.createElement('span')
+    name.className = 'airplay-name'
+    name.textContent = device.label || device.name || device.url
+    title.appendChild(name)
+    if (device.location) {
+      const badge = document.createElement('span')
+      badge.className = 'location-badge'
+      badge.textContent = device.location
+      title.appendChild(badge)
+    }
+
+    const meta = document.createElement('span')
+    meta.className = 'airplay-meta'
+    const parts = deviceMetaLine(device)
+    meta.textContent = parts.join(' · ')
+    if (device.supports_airplay) {
+      const ready = document.createElement('span')
+      ready.className = 'airplay-ready'
+      ready.textContent = ' · AirPlay Ready'
+      meta.appendChild(ready)
+    }
+
+    body.appendChild(title)
+    body.appendChild(meta)
+    card.appendChild(icon)
+    card.appendChild(body)
+    card.addEventListener('click', async () => {
+      el.rokuUrl.value = device.url
+      for (const node of el.rokuDeviceList.querySelectorAll('.airplay-device')) {
+        node.classList.toggle('selected', node.dataset.url === device.url)
+      }
+      appendLog({ source: 'roku', line: `selected ${device.url}` })
+      await saveConfig({ rokuUrl: device.url })
+    })
+    el.rokuDeviceList.appendChild(card)
+  }
+
+  if (devices.length) {
+    el.rokuScanSummary.textContent = `${devices.length} Roku${devices.length === 1 ? '' : 's'} on this LAN`
+  } else if (state.rokuScanError) {
+    el.rokuScanSummary.textContent = `Scan failed: ${state.rokuScanError}`
+  } else if (state.lastRokuScan) {
+    el.rokuScanSummary.textContent = 'No Roku answered on this LAN. Check the TV is on and ECP is enabled.'
+  } else {
+    el.rokuScanSummary.textContent = 'Scan the LAN to pick a Roku the way AirPlay lists speakers.'
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Server RTT & Japan sync math simulator                                    */
+/* ------------------------------------------------------------------------- */
+function renderPing(state) {
+  const ping = state.pingTest || {}
+  const result = ping.result
+  el.pingLive.disabled = Boolean(ping.running)
+  el.pingJapan.disabled = Boolean(ping.running)
+  el.pingLive.textContent = ping.running ? 'Pinging...' : 'Ping Server Now (Live RTT)'
+  el.pingJapan.textContent = ping.running ? 'Pinging...' : 'Simulate Japan Client (+240ms RTT)'
+
+  if (ping.error) {
+    el.pingError.classList.remove('hidden')
+    el.pingError.textContent = ping.error
+  } else {
+    el.pingError.classList.add('hidden')
+  }
+
+  if (!result) {
+    if (!ping.running) {
+      setChip(el.pingMode, 'Not measured', 'idle')
+      el.pingBest.textContent = '-'
+      el.pingOneWay.textContent = '-'
+      el.pingJitter.textContent = '-'
+      el.pingOffset.textContent = '-'
+      el.pingRokuOneWay.textContent = '-'
+      el.pingLead.textContent = '-'
+      el.pingSamples.innerHTML = ''
+      el.pingFormula.textContent = 'Run a ping to see the sync math.'
+    }
+    return
+  }
+
+  if (result.mode === 'japan_simulation') {
+    setChip(el.pingMode, 'Japan simulation', 'warn')
+  } else {
+    setChip(el.pingMode, 'Live', 'running')
+  }
+  el.pingBest.textContent = `${result.best_rtt_ms}`
+  el.pingOneWay.textContent = `${result.one_way_network_ms}`
+  el.pingJitter.textContent = `${result.jitter_ms}`
+  el.pingOffset.textContent = `${result.clock_offset_ms}`
+  el.pingRokuOneWay.textContent = `${result.roku_one_way_ms}`
+  el.pingLead.textContent = `${result.adaptive_lead_ms / 1000}s`
+
+  el.pingSamples.innerHTML = ''
+  for (const sample of result.samples || []) {
+    const pill = document.createElement('span')
+    pill.className = 'ping-sample' + (sample.selected ? ' best' : '')
+    pill.textContent = `#${sample.index}: ${Math.round(sample.network_rtt_ms)}ms${sample.selected ? ' ★' : ''}`
+    pill.title = `raw ${sample.raw_rtt_ms} ms · total ${sample.total_rtt_ms} ms · offset ${sample.offset_ms} ms`
+    el.pingSamples.appendChild(pill)
+  }
+  el.pingFormula.textContent = result.formula_summary || ''
 }
 
 function renderState(state) {
@@ -289,6 +478,8 @@ function renderState(state) {
   renderDevices(state)
   renderAnc(state)
   renderBridge(state)
+  renderRokuDevices(state)
+  renderPing(state)
   const busy = state.anc.running || state.bridge.running
   setChip(el.connection, busy ? 'Active' : 'Idle', busy ? 'running' : 'idle')
 }
@@ -340,6 +531,58 @@ el.toggleToken.addEventListener('click', () => {
   el.roomToken.type = hidden ? 'text' : 'password'
   el.toggleToken.textContent = hidden ? 'Hide' : 'Show'
   el.toggleToken.setAttribute('aria-label', hidden ? 'Hide token' : 'Show token')
+})
+
+el.copyToken.addEventListener('click', async () => {
+  const text = el.roomToken.value
+  const copied = await api.copy(text)
+  if (copied) {
+    el.copyToken.textContent = 'Copied!'
+    el.copyToken.classList.add('copied')
+    setTimeout(() => {
+      el.copyToken.textContent = 'Copy'
+      el.copyToken.classList.remove('copied')
+    }, 1500)
+  } else {
+    el.copyToken.textContent = 'Copy failed'
+    setTimeout(() => { el.copyToken.textContent = 'Copy' }, 1500)
+  }
+})
+
+el.scanRoku.addEventListener('click', async () => {
+  el.scanRoku.disabled = true
+  el.scanRoku.textContent = 'Scanning...'
+  try {
+    renderState(await api.scanRokuDevices())
+  } catch (error) {
+    appendLog({ source: 'roku-scan', line: error.message })
+  } finally {
+    el.scanRoku.disabled = false
+    el.scanRoku.textContent = 'Scan LAN for Rokus'
+  }
+})
+
+el.pingLive.addEventListener('click', async () => {
+  try {
+    renderState(await api.pingServer({ samples: 5 }))
+  } catch (error) {
+    appendLog({ source: 'ping', line: error.message })
+  }
+})
+
+el.pingJapan.addEventListener('click', async () => {
+  // Matches the button label: 240 ms of extra round-trip time, which is roughly
+  // a Tokyo↔Copenhagen path once you double the one-way hop. The small jitter
+  // makes the sample strip move the way a real long-haul link does.
+  try {
+    renderState(await api.pingServer({
+      samples: 5,
+      simulateAddedRttMs: 240,
+      simulateJitterMs: 18,
+    }))
+  } catch (error) {
+    appendLog({ source: 'ping', line: error.message })
+  }
 })
 
 el.refresh.addEventListener('click', async () => {

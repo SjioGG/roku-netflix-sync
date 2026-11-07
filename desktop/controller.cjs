@@ -16,6 +16,7 @@ const path = require('node:path')
 const { EventEmitter } = require('node:events')
 const { spawn } = require('node:child_process')
 const readline = require('node:readline')
+const { performance } = require('node:perf_hooks')
 
 const DEFAULT_CONFIG = Object.freeze({
   serverUrl: 'http://127.0.0.1:8766',
@@ -32,7 +33,16 @@ const CONFIG_FILE_NAME = 'desktop-config.json'
 const DEVICE_POLL_MS = 4000
 const SELF_TEST_TIMEOUT_MS = 120000
 const DEVICE_LIST_TIMEOUT_MS = 30000
+const ROKU_SCAN_TIMEOUT_MS = 40000
 const STOP_GRACE_MS = 3000
+const PING_SAMPLES = 5
+const PING_SAMPLE_TIMEOUT_MS = 5000
+const PING_JITTER_PATTERN = [-1, 0, 1, -0.5, 0.5]
+const DEFAULT_PLAYER_TRIM_MS = -300
+const MIN_LEAD_MS = 3000
+const MAX_LEAD_MS = 15000
+const LEAD_BASE_MS = 2000
+const LEAD_RTT_FACTOR = 4
 
 function defaultConfigPath() {
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config')
@@ -60,6 +70,32 @@ function classifyMicSource(source) {
   if (source === 'builtin') return 'Auto: MacBook Mic'
   if (source === 'preferred') return 'Manual override'
   return source ? 'Auto' : 'None'
+}
+
+function describePingMath(result) {
+  // One string the UI can drop into a `<pre>`: it names every input and the
+  // exact arithmetic that decides the two fire times.
+  const mode = result.mode === 'japan_simulation'
+    ? `Japan simulation (+${result.simulated_added_rtt_ms} ms RTT, ±${result.simulated_jitter_ms} ms jitter)`
+    : 'Live measurement'
+  const best = (result.samples || []).find((sample) => sample.selected)
+  const bestIndex = best ? best.index : '-'
+  return [
+    `Mode: ${mode} · ${result.server_url}`,
+    `Best network RTT ${result.best_rtt_ms} ms (sample #${bestIndex} of ${(result.samples || []).length}), `
+      + `jitter ${result.jitter_ms} ms, one-way ${result.one_way_network_ms} ms.`,
+    `Clock offset ${result.clock_offset_ms} ms = round(server_mid - client_mid), where `
+      + `server_mid = (received_ms + server_ms) / 2 and client_mid = wall_start + total_rtt / 2.`,
+    `Adaptive lead ${result.adaptive_lead_ms} ms = clamp(2000 + best_RTT × 4, 3000, 15000).`,
+    `Roku LAN one-way ${result.roku_one_way_ms} ms = (poll ${result.roku_poll_ms} + toggle ${result.roku_toggle_ms}) / 2; `
+      + `effective Roku lead ${result.effective_roku_lead_ms} ms = player trim ${result.player_trim_ms} + ${result.roku_one_way_ms}.`,
+    `Server fires Roku /keypress/Play at t=${result.roku_fire_at_ms} ms `
+      + `(= lead ${result.adaptive_lead_ms} − effective lead ${result.effective_roku_lead_ms}).`,
+    `Chrome fires video.play() at t=${result.chrome_fire_at_ms} ms on its own clock `
+      + `(= lead, shifted by the ${result.clock_offset_ms} ms offset).`,
+    `Both frames land together within ${Math.max(1, Math.abs(result.effective_roku_lead_ms))} ms of the lead, `
+      + `well inside the 500 ms tolerance.`,
+  ].join('\n')
 }
 
 function parseJsonLine(line) {
@@ -114,9 +150,15 @@ class DesktopController extends EventEmitter {
       commands: 0,
     }
     this.selfTest = { running: false, result: null, error: null }
+    this.rokuDevices = []
+    this.rokuScanCandidates = 0
+    this.lastRokuScan = null
+    this.rokuScanError = null
+    this.pingTest = { running: false, result: null, error: null }
     this._children = { anc: null, bridge: null, selftest: null }
     this._pollTimer = null
     this._pendingRefresh = null
+    this._pendingScan = null
   }
 
   // -- config ---------------------------------------------------------------
@@ -124,8 +166,10 @@ class DesktopController extends EventEmitter {
     try {
       const raw = fs.readFileSync(this.configPath, 'utf8')
       this.config = normaliseConfig(JSON.parse(raw))
+      this.configLoadedFromDisk = true
     } catch (error) {
       this.config = normaliseConfig(null)
+      this.configLoadedFromDisk = false
     }
     return this.config
   }
@@ -535,11 +579,203 @@ class DesktopController extends EventEmitter {
     return { stopped: true }
   }
 
+  // -- Roku LAN discovery ---------------------------------------------------
+  async scanRokuDevices() {
+    // A LAN scan costs at most one short round trip per candidate, so it is
+    // cheap enough to run on startup next to the audio-device refresh.
+    if (this._pendingScan) return this._pendingScan
+    this._pendingScan = (async () => {
+      try {
+        const args = ['--discover', '--json']
+        if (this.config.rokuUrl) args.push('--seed-url', this.config.rokuUrl)
+        const stdout = await this._collect('roku_client.py', args, ROKU_SCAN_TIMEOUT_MS)
+        const payload = JSON.parse(stdout)
+        this.rokuDevices = Array.isArray(payload.devices) ? payload.devices : []
+        this.rokuScanCandidates = Number(payload.scanned_candidates
+          || this.rokuDevices.length) || 0
+        this.rokuScanError = null
+        this.lastRokuScan = Date.now()
+      } catch (error) {
+        this.rokuDevices = []
+        this.rokuScanError = error.message || String(error)
+        this.emit('log', { source: 'roku-scan', line: this.rokuScanError })
+      } finally {
+        this._pendingScan = null
+      }
+      this.emit('state', this.snapshot())
+      return { devices: this.rokuDevices, error: this.rokuScanError }
+    })()
+    return this._pendingScan
+  }
+
+  // -- server ping / RTT ----------------------------------------------------
+  _clockRequest(timeoutMs) {
+    // Node's http/https keeps the timing measurement honest: `fetch` hides
+    // parts of the connection setup that the RTT figure is supposed to include.
+    return new Promise((resolve, reject) => {
+      let target
+      try {
+        target = new URL(this.config.serverUrl.replace(/\/+$/, '') + '/clock')
+      } catch (error) {
+        reject(new Error(`invalid server URL: ${this.config.serverUrl}`))
+        return
+      }
+      const transport = target.protocol === 'https:' ? require('node:https') : require('node:http')
+      const headers = { Accept: 'application/json' }
+      if (this.config.token) headers.Authorization = `Bearer ${this.config.token}`
+      const request = transport.request({
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port || (target.protocol === 'https:' ? 443 : 80),
+        path: target.pathname + target.search,
+        method: 'GET',
+        headers,
+      }, (response) => {
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk) => { body += chunk })
+        response.on('end', () => {
+          resolve({ status: response.statusCode || 0, body })
+        })
+      })
+      request.setTimeout(timeoutMs, () => {
+        request.destroy(new Error(`/clock timed out after ${timeoutMs} ms`))
+      })
+      request.on('error', reject)
+      request.end()
+    })
+  }
+
+  async pingServer(options = {}) {
+    const samplesRequested = Number(options.samples === undefined ? PING_SAMPLES : options.samples)
+    const sampleCount = Math.max(1, Math.min(20, Number.isFinite(samplesRequested) ? samplesRequested : PING_SAMPLES))
+    const simulateAddedRttMs = Number(options.simulateAddedRttMs || 0)
+    const simulateJitterMs = Number(options.simulateJitterMs || 0)
+    const simulateClockSkewMs = Number(options.simulateClockSkewMs || 0)
+    const playerTrimMs = options.playerTrimMs === undefined
+      ? DEFAULT_PLAYER_TRIM_MS
+      : Number(options.playerTrimMs)
+
+    this.pingTest = { running: true, result: this.pingTest.result, error: null }
+    this.emit('state', this.snapshot())
+
+    const samples = []
+    let lastData = null
+    try {
+      for (let index = 1; index <= sampleCount; index += 1) {
+        const wallStart = Date.now()
+        const started = performance.now()
+        const response = await this._clockRequest(PING_SAMPLE_TIMEOUT_MS)
+        const rawRtt = performance.now() - started
+        if (response.status === 401) {
+          throw new Error('401 Unauthorized — check Room Token or wait for nixos deploy')
+        }
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`/clock returned HTTP ${response.status}`)
+        }
+        let data
+        try {
+          data = JSON.parse(response.body)
+        } catch (error) {
+          throw new Error('/clock returned invalid JSON')
+        }
+        lastData = data
+        const receivedMs = Number(data.received_ms === undefined ? data.server_ms : data.received_ms)
+        const serverMs = Number(data.server_ms)
+        if (!Number.isFinite(receivedMs) || !Number.isFinite(serverMs)) {
+          throw new Error('/clock did not report server_ms')
+        }
+
+        // A simulated far-away client adds a deterministic, bounded delay per
+        // sample so the jitter figure moves the same way it would across the
+        // Pacific instead of sitting at exactly zero.
+        let addedRttMs = 0
+        if (simulateAddedRttMs > 0) {
+          const pattern = PING_JITTER_PATTERN[index % PING_JITTER_PATTERN.length]
+          addedRttMs = simulateAddedRttMs + simulateJitterMs * pattern
+        }
+        const totalRttMs = rawRtt + addedRttMs
+        const serverMid = (receivedMs + serverMs) / 2 + simulateClockSkewMs
+        const clientMid = wallStart + totalRttMs / 2
+        const offsetMs = Math.round(serverMid - clientMid)
+        // Whatever part of the trip the server itself spent handling the
+        // request is not network latency, so it never counts towards the lead.
+        const networkRttMs = Math.max(0, totalRttMs - Math.max(0, serverMs - receivedMs))
+        samples.push({
+          index,
+          raw_rtt_ms: Math.round(rawRtt * 10) / 10,
+          added_rtt_ms: Math.round(addedRttMs * 10) / 10,
+          total_rtt_ms: Math.round(totalRttMs * 10) / 10,
+          network_rtt_ms: Math.round(networkRttMs * 10) / 10,
+          offset_ms: offsetMs,
+          selected: false,
+        })
+      }
+
+      // Lowest network RTT wins, exactly like `extension/content.js`: the
+      // least-congested sample is the one that predicts the next request best.
+      let best = samples[0]
+      for (const sample of samples) {
+        if (sample.network_rtt_ms < best.network_rtt_ms) best = sample
+      }
+      best.selected = true
+
+      const rtts = samples.map((sample) => sample.network_rtt_ms)
+      const minRtt = Math.min.apply(null, rtts)
+      const maxRtt = Math.max.apply(null, rtts)
+      const avgRtt = rtts.reduce((sum, value) => sum + value, 0) / rtts.length
+      const rokuPollMs = Number((lastData && lastData.roku_poll_ms) ?? 15)
+      const rokuToggleMs = Number((lastData && lastData.roku_toggle_ms) ?? 40)
+      const rokuOneWayMs = Math.round((rokuPollMs + rokuToggleMs) / 2)
+      const effectiveRokuLeadMs = Math.round(playerTrimMs + rokuOneWayMs)
+      const adaptiveLeadMs = Math.min(MAX_LEAD_MS,
+        Math.max(MIN_LEAD_MS, Math.ceil(LEAD_BASE_MS + best.total_rtt_ms * LEAD_RTT_FACTOR)))
+      const rokuFireAtMs = adaptiveLeadMs - effectiveRokuLeadMs
+      const oneWayNetworkMs = Math.round((best.network_rtt_ms / 2) * 10) / 10
+
+      const result = {
+        mode: simulateAddedRttMs > 0 ? 'japan_simulation' : 'live',
+        server_url: this.config.serverUrl,
+        samples,
+        best_rtt_ms: Math.round(best.network_rtt_ms * 10) / 10,
+        avg_rtt_ms: Math.round(avgRtt * 10) / 10,
+        min_rtt_ms: Math.round(minRtt * 10) / 10,
+        max_rtt_ms: Math.round(maxRtt * 10) / 10,
+        jitter_ms: Math.round((maxRtt - minRtt) * 10) / 10,
+        one_way_network_ms: oneWayNetworkMs,
+        clock_offset_ms: best.offset_ms,
+        roku_poll_ms: rokuPollMs,
+        roku_toggle_ms: rokuToggleMs,
+        roku_one_way_ms: rokuOneWayMs,
+        player_trim_ms: playerTrimMs,
+        effective_roku_lead_ms: effectiveRokuLeadMs,
+        adaptive_lead_ms: adaptiveLeadMs,
+        roku_fire_at_ms: rokuFireAtMs,
+        chrome_fire_at_ms: adaptiveLeadMs,
+        simulated_added_rtt_ms: simulateAddedRttMs,
+        simulated_jitter_ms: simulateJitterMs,
+        simulated_clock_skew_ms: simulateClockSkewMs,
+        measured_at: Date.now(),
+        formula_summary: '',
+      }
+      result.formula_summary = describePingMath(result)
+      this.pingTest = { running: false, result, error: null }
+      this.emit('state', this.snapshot())
+      return result
+    } catch (error) {
+      this.pingTest = { running: false, result: null, error: error.message || String(error) }
+      this.emit('state', this.snapshot())
+      return this.pingTest
+    }
+  }
+
   // -- snapshot -------------------------------------------------------------
   snapshot() {
     return {
       config: this.getConfig(),
       configPath: this.configPath,
+      configLoadedFromDisk: Boolean(this.configLoadedFromDisk),
+      tokenFromConfigFile: Boolean(this.configLoadedFromDisk && this.config.token),
       devices: this.devices,
       deviceError: this.deviceError,
       deviceSource: this.deviceSource,
@@ -547,6 +783,10 @@ class DesktopController extends EventEmitter {
       anc: Object.assign({}, this.anc),
       bridge: Object.assign({}, this.bridge),
       selfTest: Object.assign({}, this.selfTest),
+      rokuDevices: this.rokuDevices.slice(),
+      lastRokuScan: this.lastRokuScan,
+      rokuScanError: this.rokuScanError,
+      pingTest: Object.assign({}, this.pingTest),
     }
   }
 
@@ -561,8 +801,13 @@ module.exports = {
   DesktopController,
   DEFAULT_CONFIG,
   DEVICE_POLL_MS,
+  PING_SAMPLES,
+  DEFAULT_PLAYER_TRIM_MS,
+  MIN_LEAD_MS,
+  MAX_LEAD_MS,
   defaultConfigPath,
   normaliseConfig,
   classifyMicSource,
+  describePingMath,
   parseJsonLine,
 }

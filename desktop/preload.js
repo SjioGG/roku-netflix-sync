@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('rokuDesktop', {
   runSelfTest: () => ipcRenderer.invoke('anc:selftest'),
   startBridge: () => ipcRenderer.invoke('bridge:start'),
   stopBridge: () => ipcRenderer.invoke('bridge:stop'),
+  scanRokuDevices: () => ipcRenderer.invoke('roku:scan'),
+  pingServer: (options) => ipcRenderer.invoke('ping:run', options || {}),
   recentLogs: () => ipcRenderer.invoke('logs:recent'),
   copy: (text) => ipcRenderer.invoke('clipboard:write', text),
   openExternal: (url) => ipcRenderer.invoke('open:external', url),

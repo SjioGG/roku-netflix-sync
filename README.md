@@ -281,9 +281,18 @@ second.
   Start ANC, Stop ANC and Run 4s DSP self-test. The warning banner repeats the
   copyable `brew install --cask blackhole-2ch` command whenever only one virtual
   device exists.
-- **Roku TV Bridge** edits the sync server URL, room token (with show/hide) and
-  Roku LAN URL, then starts `roku_client.py` and shows the live player state, app
-  and position.
+- **Roku TV Bridge** edits the sync server URL, room token (with show/hide and a
+  one-click **Copy**), and Roku LAN URL, then starts `roku_client.py` and shows
+  the live player state, app and position. A badge marks a token that came off
+  disk, so you can tell a saved token from one you just pasted.
+- **AirPlay-style device picker** re-scans the LAN and lists every Roku it finds
+  as a speaker/TV card: friendly name, location badge, model number, network,
+  active app, measured latency and whether AirPlay is ready. Clicking a card
+  saves that URL as the active Roku.
+- **Server RTT & Japan Sync Math Simulator** pings `/clock` five times, picks the
+  best sample, and prints the exact sync math: best RTT, one-way latency,
+  jitter, clock offset, Roku LAN one-way and the adaptive countdown. Simulate
+  Japan shows what a `+240 ms` RTT does to the countdown and the two fire times.
 - Device discovery re-runs every 4 seconds while the window is open, so plugging
   the USB soundcard in switches the active mic without a restart.
 
@@ -311,8 +320,18 @@ exercise extension event/race behavior and the Netflix API bridge in a simulated
 page. They do not establish actual Netflix/DRM or Denmark–Japan playback behavior.
 `tests/desktop-app.cjs` drives `desktop/controller.cjs` and the local UI server
 directly: config persistence, live device discovery through
-`aec_daemon.py --list-devices --json`, a real `--selftest --json` run, and the
-spawn/stop lifecycle of both Python children.
+`aec_daemon.py --list-devices --json`, a real `--selftest --json` run, the
+spawn/stop lifecycle of both Python children, `scanRokuDevices()` against the
+discovery CLI, and `pingServer()` against an in-process `/clock` server in both
+live and Japan-simulation modes.
+
+Roku discovery has a CLI of its own, so the LAN scan works without the UI:
+
+```sh
+python3 roku_client.py --discover            # human-readable device lines
+python3 roku_client.py --discover --json     # the same payload the desktop app parses
+python3 roku_client.py --discover --seed-url http://192.168.1.100:8060
+```
 
 The launcher can be checked without a display server:
 

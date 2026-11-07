@@ -107,6 +107,14 @@ function createServer(options = {}) {
       await controller.stopRokuBridge()
       return controller.snapshot()
     },
+    'POST /api/roku/scan': async () => {
+      await controller.scanRokuDevices()
+      return controller.snapshot()
+    },
+    'POST /api/ping': async (body) => {
+      await controller.pingServer((body && body.options) || body || {})
+      return controller.snapshot()
+    },
   }
 
   const server = http.createServer(async (request, response) => {
@@ -161,6 +169,7 @@ if (require.main === module) {
     app.controller.refreshDevices().catch((error) => {
       console.error('device refresh failed:', error.message)
     })
+    app.controller.scanRokuDevices().catch(() => {})
     const shutdown = () => {
       app.controller.dispose().then(() => app.close()).then(() => process.exit(0))
     }

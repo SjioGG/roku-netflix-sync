@@ -18,6 +18,7 @@ const {
   defaultConfigPath,
   normaliseConfig,
   classifyMicSource,
+  describePingMath,
   parseJsonLine,
 } = require('../desktop/controller.cjs')
 const { createServer } = require('../desktop/server.cjs')
@@ -507,6 +508,587 @@ async function main() {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  console.log('desktop Roku discovery')
+
+  await test('snapshot ships an empty Roku device list before the first scan', () => {
+    const { dir, file } = tempConfigPath()
+    const controller = freshController(file)
+    try {
+      const snapshot = controller.snapshot()
+      assert.deepEqual(snapshot.rokuDevices, [])
+      assert.equal(snapshot.lastRokuScan, null)
+      assert.deepEqual(snapshot.pingTest, { running: false, result: null, error: null })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('scanRokuDevices runs the discovery CLI with a seed URL', async () => {
+    const { dir, file } = tempConfigPath()
+    const { PassThrough } = require('node:stream')
+    const { EventEmitter } = require('node:events')
+    const spawned = []
+    const fakeSpawn = (command, args) => {
+      spawned.push({ command, args })
+      const child = new EventEmitter()
+      child.pid = 9090
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.kill = () => true
+      setTimeout(() => {
+        child.stdout.end(JSON.stringify({
+          devices: [
+            { url: 'http://192.168.1.100:8060', name: 'Living Room TV', location: 'Bedroom',
+              model_name: 'Roku Smart Soundbar', model_number: '9101X', network_name: 'Example Wi-Fi',
+              network_type: 'wifi', active_app: 'YouTube', latency_ms: 14,
+              supports_airplay: true, is_soundbar: true, label: 'Living Room TV (Bedroom)' },
+            { url: 'http://192.168.1.50:8060', name: 'Office Roku', location: '',
+              model_name: 'Roku Ultra', model_number: '4802X', network_name: 'home-lan',
+              network_type: 'wired', active_app: null, latency_ms: 9,
+              supports_airplay: false, is_soundbar: false, label: 'Office Roku' },
+          ],
+          scanned_candidates: 7,
+        }))
+        setTimeout(() => child.emit('close', 0), 5)
+      }, 20)
+      return child
+    }
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn })
+    try {
+      controller.saveConfig({ rokuUrl: 'http://192.168.1.100:8060' })
+      const before = Date.now()
+      const result = await controller.scanRokuDevices()
+      assert.equal(spawned.length, 1)
+      assert.equal(spawned[0].command, 'python3')
+      assert.ok(spawned[0].args.some((arg) => arg.endsWith('roku_client.py')), spawned[0].args.join(' '))
+      for (const flag of ['--discover', '--json', '--seed-url']) {
+        assert.ok(spawned[0].args.includes(flag), `${flag} missing from ${spawned[0].args.join(' ')}`)
+      }
+      assert.equal(spawned[0].args[spawned[0].args.indexOf('--seed-url') + 1], 'http://192.168.1.100:8060')
+      assert.equal(result.devices.length, 2)
+      assert.equal(controller.rokuDevices.length, 2)
+      assert.equal(controller.rokuDevices[0].model_number, '9101X')
+      assert.equal(controller.rokuDevices[1].active_app, null)
+      assert.ok(controller.lastRokuScan >= before)
+      assert.equal(controller.rokuScanError, null)
+      const snapshot = controller.snapshot()
+      assert.equal(snapshot.rokuDevices.length, 2)
+      assert.equal(snapshot.lastRokuScan, controller.lastRokuScan)
+    } finally {
+      await controller.dispose()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('scanRokuDevices keeps a failed scan out of the state list', async () => {
+    const { dir, file } = tempConfigPath()
+    const { PassThrough } = require('node:stream')
+    const { EventEmitter } = require('node:events')
+    const fakeSpawn = () => {
+      const child = new EventEmitter()
+      child.pid = 9091
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.kill = () => true
+      setTimeout(() => {
+        child.stderr.end('Traceback: boom\n')
+        child.emit('close', 1)
+      }, 10)
+      return child
+    }
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn })
+    try {
+      const result = await controller.scanRokuDevices()
+      assert.deepEqual(result.devices, [])
+      assert.ok(/exited with 1/.test(controller.rokuScanError), controller.rokuScanError)
+      assert.deepEqual(controller.snapshot().rokuDevices, [])
+    } finally {
+      await controller.dispose()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('scanRokuDevices reads the live discovery CLI', async () => {
+    const { dir, file } = tempConfigPath()
+    const controller = freshController(file)
+    try {
+      // Seeds only: no SSDP or arp chatter so the test stays offline-safe.
+      controller.saveConfig({ rokuUrl: 'http://127.0.0.1:1' })
+      const result = await controller.scanRokuDevices()
+      assert.ok(Array.isArray(result.devices), 'devices is not an array')
+      assert.ok(controller.lastRokuScan > 0)
+      // A reserved port cannot answer, so nothing is discovered and no error is
+      // raised: discovery treats unreachable candidates as normal.
+      assert.equal(controller.rokuScanError, null)
+    } finally {
+      await controller.dispose()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  console.log('desktop ping / RTT tester')
+
+  await test('pingServer measures a local /clock server and selects the best sample', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    const clock = http.createServer((request, response) => {
+      if (request.url !== '/clock') {
+        response.writeHead(404).end()
+        return
+      }
+      if (request.headers.authorization !== 'Bearer room-token') {
+        response.writeHead(401, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify({ error: 'Unauthorized' }))
+        return
+      }
+      const received = Date.now()
+      const payload = JSON.stringify({
+        server_ms: Date.now(),
+        received_ms: received,
+        roku_poll_ms: 18,
+        roku_toggle_ms: 44,
+      })
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(payload)
+    })
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file })
+    try {
+      await new Promise((resolve) => clock.listen(0, '127.0.0.1', resolve))
+      const port = clock.address().port
+      controller.saveConfig({ serverUrl: `http://127.0.0.1:${port}`, token: 'room-token' })
+      const result = await controller.pingServer()
+      assert.equal(result.mode, 'live')
+      assert.equal(result.samples.length, 5)
+      assert.equal(result.samples.filter((sample) => sample.selected).length, 1)
+      const selected = result.samples.find((sample) => sample.selected)
+      assert.equal(result.best_rtt_ms, Math.round(selected.network_rtt_ms * 10) / 10)
+      assert.ok(Number.isFinite(result.min_rtt_ms))
+      assert.ok(result.max_rtt_ms >= result.min_rtt_ms)
+      assert.ok(result.avg_rtt_ms >= result.min_rtt_ms && result.avg_rtt_ms <= result.max_rtt_ms)
+      assert.equal(result.jitter_ms, Math.round((result.max_rtt_ms - result.min_rtt_ms) * 10) / 10)
+      assert.equal(result.one_way_network_ms, Math.round((selected.network_rtt_ms / 2) * 10) / 10)
+      assert.equal(result.clock_offset_ms, selected.offset_ms)
+      assert.equal(result.roku_poll_ms, 18)
+      assert.equal(result.roku_toggle_ms, 44)
+      assert.equal(result.roku_one_way_ms, 31)
+      assert.equal(result.player_trim_ms, -300)
+      assert.equal(result.effective_roku_lead_ms, -269)
+      assert.equal(result.adaptive_lead_ms,
+        Math.min(15000, Math.max(3000, Math.ceil(2000 + selected.total_rtt_ms * 4))))
+      assert.equal(result.roku_fire_at_ms, result.adaptive_lead_ms - result.effective_roku_lead_ms)
+      assert.equal(result.chrome_fire_at_ms, result.adaptive_lead_ms)
+      assert.equal(result.server_url, `http://127.0.0.1:${port}`)
+      assert.ok(/Adaptive lead/.test(result.formula_summary), result.formula_summary)
+      assert.ok(/keypress\/Play/.test(result.formula_summary), result.formula_summary)
+      // Every sample keeps the raw and derived timings side by side.
+      for (const sample of result.samples) {
+        assert.ok(Number.isFinite(sample.raw_rtt_ms))
+        assert.ok(Number.isFinite(sample.total_rtt_ms))
+        assert.ok(sample.network_rtt_ms >= 0)
+        assert.ok(Number.isInteger(sample.offset_ms))
+      }
+      assert.deepEqual(controller.pingTest, { running: false, result, error: null })
+      assert.equal(controller.snapshot().pingTest.result.best_rtt_ms, result.best_rtt_ms)
+    } finally {
+      await controller.dispose()
+      await new Promise((resolve) => clock.close(resolve))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('pingServer returns the Japan +240 ms simulation with extra RTT and jitter', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    const clock = http.createServer((request, response) => {
+      if (request.url !== '/clock') {
+        response.writeHead(404).end()
+        return
+      }
+      const received = Date.now()
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ server_ms: Date.now(), received_ms: received,
+        roku_poll_ms: 15, roku_toggle_ms: 40 }))
+    })
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file })
+    try {
+      await new Promise((resolve) => clock.listen(0, '127.0.0.1', resolve))
+      const port = clock.address().port
+      controller.saveConfig({ serverUrl: `http://127.0.0.1:${port}`, token: '' })
+      const live = await controller.pingServer()
+      const japan = await controller.pingServer({ simulateAddedRttMs: 240, simulateJitterMs: 12 })
+      assert.equal(japan.mode, 'japan_simulation')
+      assert.equal(japan.simulated_added_rtt_ms, 240)
+      assert.equal(japan.simulated_jitter_ms, 12)
+      // Every simulated sample carries the added RTT on top of its raw figure.
+      for (const sample of japan.samples) {
+        const added = sample.added_rtt_ms
+        assert.ok(added >= 240 - 12 && added <= 240 + 12, `added ${added} out of range`)
+        assert.equal(sample.total_rtt_ms, Math.round((sample.raw_rtt_ms + added) * 10) / 10)
+      }
+      // The deterministic jitter pattern must actually move the samples around.
+      const addedValues = new Set(japan.samples.map((sample) => sample.added_rtt_ms))
+      assert.ok(addedValues.size > 1, `jitter did not vary: ${[...addedValues].join(', ')}`)
+      // Japan is further away, so the RTT and the adaptive lead both grow.
+      assert.ok(japan.best_rtt_ms > live.best_rtt_ms + 200,
+        `${japan.best_rtt_ms} should exceed ${live.best_rtt_ms} by ~240 ms`)
+      assert.ok(japan.adaptive_lead_ms >= live.adaptive_lead_ms)
+      assert.equal(japan.adaptive_lead_ms,
+        Math.min(15000, Math.max(3000, Math.ceil(2000 + japan.samples.find((s) => s.selected).total_rtt_ms * 4))))
+      // The fire times differ by exactly the effective Roku lead, which is what
+      // keeps both frames inside the 500 ms tolerance.
+      assert.equal(japan.chrome_fire_at_ms - japan.roku_fire_at_ms, japan.effective_roku_lead_ms)
+      assert.ok(Math.abs(japan.chrome_fire_at_ms - japan.roku_fire_at_ms) < 500,
+        `fire times drifted by ${japan.chrome_fire_at_ms - japan.roku_fire_at_ms} ms`)
+      assert.ok(/Japan simulation/.test(japan.formula_summary), japan.formula_summary)
+      assert.ok(japan.jitter_ms > 0, `jitter was ${japan.jitter_ms}`)
+    } finally {
+      await controller.dispose()
+      await new Promise((resolve) => clock.close(resolve))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('pingServer reports 401 with the room-token hint', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    const clock = http.createServer((request, response) => {
+      response.writeHead(401, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ error: 'Unauthorized' }))
+    })
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file })
+    try {
+      await new Promise((resolve) => clock.listen(0, '127.0.0.1', resolve))
+      controller.saveConfig({ serverUrl: `http://127.0.0.1:${clock.address().port}`, token: 'wrong' })
+      const result = await controller.pingServer({ samples: 1 })
+      assert.equal(result.running, false)
+      assert.equal(result.result, null)
+      assert.ok(/401 Unauthorized/.test(result.error), result.error)
+      assert.ok(/Room Token/.test(result.error), result.error)
+      assert.equal(controller.pingTest.error, result.error)
+    } finally {
+      await controller.dispose()
+      await new Promise((resolve) => clock.close(resolve))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('pingServer reports an unreachable relay instead of throwing', async () => {
+    const { dir, file } = tempConfigPath()
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file })
+    try {
+      // Port 1 is reserved, so the connection is refused immediately.
+      controller.saveConfig({ serverUrl: 'http://127.0.0.1:1', token: '' })
+      const result = await controller.pingServer({ samples: 2 })
+      assert.equal(result.running, false)
+      assert.equal(result.result, null)
+      assert.ok(result.error && result.error.length > 0, JSON.stringify(result))
+      assert.equal(controller.snapshot().pingTest.error, result.error)
+    } finally {
+      await controller.dispose()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('pingServer accepts a custom sample count and player trim', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    let hits = 0
+    const clock = http.createServer((request, response) => {
+      hits += 1
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ server_ms: Date.now(), received_ms: Date.now(),
+        roku_poll_ms: 20, roku_toggle_ms: 60 }))
+    })
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file })
+    try {
+      await new Promise((resolve) => clock.listen(0, '127.0.0.1', resolve))
+      controller.saveConfig({ serverUrl: `http://127.0.0.1:${clock.address().port}`, token: 't' })
+      const result = await controller.pingServer({ samples: 3, playerTrimMs: -100 })
+      assert.equal(hits, 3)
+      assert.equal(result.samples.length, 3)
+      assert.equal(result.player_trim_ms, -100)
+      assert.equal(result.roku_one_way_ms, 40)
+      assert.equal(result.effective_roku_lead_ms, -60)
+    } finally {
+      await controller.dispose()
+      await new Promise((resolve) => clock.close(resolve))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('describePingMath names every input and both fire times', () => {
+    const text = describePingMath({
+      mode: 'japan_simulation', simulated_added_rtt_ms: 240, simulated_jitter_ms: 12,
+      server_url: 'https://sync.example.test', best_rtt_ms: 268.4,
+      one_way_network_ms: 134.2, jitter_ms: 9.5, clock_offset_ms: -42,
+      roku_poll_ms: 15, roku_toggle_ms: 40, roku_one_way_ms: 28,
+      player_trim_ms: -300, effective_roku_lead_ms: -272, adaptive_lead_ms: 3120,
+      roku_fire_at_ms: 3392, chrome_fire_at_ms: 3120,
+      samples: [{ index: 2, selected: true }],
+    })
+    assert.ok(/Japan simulation/.test(text), text)
+    assert.ok(/Best network RTT 268.4 ms/.test(text), text)
+    assert.ok(/sample #2 of 1/.test(text), text)
+    assert.ok(/Clock offset -42 ms/.test(text), text)
+    assert.ok(/Adaptive lead 3120 ms/.test(text), text)
+    assert.ok(/keypress\/Play at t=3392 ms/.test(text), text)
+    assert.ok(/video\.play\(\) at t=3120 ms/.test(text), text)
+    assert.ok(/500 ms tolerance/.test(text), text)
+  })
+
+  await test('the local UI server exposes the scan and ping routes', async () => {
+    const { dir, file } = tempConfigPath()
+    const app = createServer({ configPath: file })
+    try {
+      const address = await app.listen(0, '127.0.0.1')
+      const base = `http://127.0.0.1:${address.port}`
+      const html = await fetch(`${base}/`).then((response) => response.text())
+      for (const id of ['copy-token', 'scan-roku', 'roku-device-list', 'ping-live', 'ping-japan']) {
+        assert.ok(html.includes(`id="${id}"`), `${id} missing from index.html`)
+      }
+      const renderer = await fetch(`${base}/renderer.js`).then((response) => response.text())
+      assert.ok(renderer.includes('scanRokuDevices'), 'renderer has no scan call')
+      assert.ok(renderer.includes('pingServer'), 'renderer has no ping call')
+      assert.ok(renderer.includes('navigator.clipboard.writeText') || renderer.includes('api.copy'),
+        'renderer has no clipboard copy')
+      const scanned = await fetch(`${base}/api/roku/scan`, { method: 'POST' })
+        .then((response) => response.json())
+      assert.ok(Array.isArray(scanned.rokuDevices), 'scan route returned no device list')
+      const pinged = await fetch(`${base}/api/ping`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ options: { samples: 1 } }),
+      }).then((response) => response.json())
+      assert.ok(pinged.pingTest, 'ping route returned no pingTest')
+      assert.equal(pinged.pingTest.running, false)
+      // The default relay is unreachable from CI, which must surface as an error
+      // in the ping state rather than a failed HTTP request.
+      assert.ok(pinged.pingTest.error || pinged.pingTest.result)
+    } finally {
+      await app.controller.dispose()
+      await app.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  console.log('desktop renderer')
+
+  await test('renderer draws the AirPlay device cards and the RTT panel', async () => {
+    const vm = require('node:vm')
+    const elements = new Map()
+
+    const makeElement = (tag) => {
+      const element = {
+        tagName: tag || 'div',
+        children: [],
+        _text: '',
+        _html: '',
+        className: '',
+        dataset: {},
+        style: {},
+        value: '',
+        type: 'text',
+        disabled: false,
+        checked: false,
+        scrollTop: 0,
+        scrollHeight: 0,
+        attributes: {},
+        listeners: {},
+        classList: {
+          _set: new Set(),
+          add(name) { this._set.add(name) },
+          remove(name) { this._set.delete(name) },
+          contains(name) { return this._set.has(name) },
+          toggle(name, force) {
+            if (force === undefined) {
+              if (this._set.has(name)) this._set.delete(name)
+              else this._set.add(name)
+            } else if (force) this._set.add(name)
+            else this._set.delete(name)
+          },
+        },
+        appendChild(child) { this.children.push(child); return child },
+        addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn) },
+        setAttribute(name, value) { this.attributes[name] = String(value) },
+        querySelectorAll() {
+          return this.children.filter((child) => String(child.className).includes('airplay-device'))
+        },
+      }
+      Object.defineProperty(element, 'textContent', {
+        get() { return this._text + this.children.map((child) => child.textContent).join('') },
+        set(value) { this._text = String(value); this.children = [] },
+      })
+      Object.defineProperty(element, 'innerHTML', {
+        get() { return this._html },
+        set(value) { this._html = String(value); if (!value) this.children = [] },
+      })
+      return element
+    }
+
+    const document = {
+      activeElement: null,
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, makeElement('div'))
+        return elements.get(id)
+      },
+      createElement(tag) { return makeElement(tag) },
+      querySelectorAll() { return [] },
+    }
+
+    const state = {
+      config: { serverUrl: 'https://sync.example.test', token: 'room-token',
+        rokuUrl: 'http://192.168.1.100:8060', autoPickSoundcard: true },
+      configPath: '/tmp/desktop-config.json',
+      configLoadedFromDisk: true,
+      tokenFromConfigFile: true,
+      devices: null,
+      deviceError: null,
+      deviceSource: null,
+      lastDeviceRefresh: null,
+      anc: { running: false, state: 'stopped', error: null, delay_ms: 0, erle_db: 0,
+        double_talk: false, mic_device: null, ref_device: null, out_device: null },
+      bridge: { running: false, state: 'stopped', error: null, roku: null, app_name: null,
+        position_ms: null, commands: 0 },
+      selfTest: { running: false, result: null, error: null },
+      rokuDevices: [
+        { url: 'http://192.168.1.100:8060', name: 'Living Room TV', location: 'Bedroom',
+          model_name: 'Roku Smart Soundbar', model_number: '9101X', network_name: 'Example Wi-Fi',
+          network_type: 'wifi', active_app: 'YouTube', latency_ms: 14,
+          supports_airplay: true, is_soundbar: true, is_tv: false,
+          power_mode: 'PowerOn', label: 'Living Room TV (Bedroom)' },
+        { url: 'http://192.168.1.50:8060', name: 'Office Roku', location: '',
+          model_name: 'Roku Ultra', model_number: '4802X', network_name: 'home-lan',
+          network_type: 'wired', active_app: null, latency_ms: 9,
+          supports_airplay: false, is_soundbar: false, is_tv: true,
+          power_mode: 'PowerOn', label: 'Office Roku' },
+      ],
+      lastRokuScan: Date.now(),
+      rokuScanError: null,
+      pingTest: {
+        running: false,
+        error: null,
+        result: {
+          mode: 'japan_simulation', server_url: 'https://sync.example.test',
+          samples: [
+            { index: 1, raw_rtt_ms: 3, total_rtt_ms: 483, network_rtt_ms: 483, offset_ms: -240, selected: false },
+            { index: 2, raw_rtt_ms: 2, total_rtt_ms: 462, network_rtt_ms: 462, offset_ms: -231, selected: true },
+          ],
+          best_rtt_ms: 462, avg_rtt_ms: 472.5, min_rtt_ms: 462, max_rtt_ms: 483, jitter_ms: 21,
+          one_way_network_ms: 231, clock_offset_ms: -231, roku_poll_ms: 15, roku_toggle_ms: 40,
+          roku_one_way_ms: 28, player_trim_ms: -300, effective_roku_lead_ms: -272,
+          adaptive_lead_ms: 3848, roku_fire_at_ms: 4120, chrome_fire_at_ms: 3848,
+          simulated_added_rtt_ms: 240, simulated_jitter_ms: 18, simulated_clock_skew_ms: 0,
+          measured_at: Date.now(),
+          formula_summary: 'Adaptive lead 3848 ms = clamp(2000 + best_RTT × 4, 3000, 15000).',
+        },
+      },
+    }
+
+    let renderState = null
+    const pingCalls = []
+    const api = {
+      isElectron: true,
+      getState: () => Promise.resolve(state),
+      saveConfig: () => Promise.resolve(state),
+      refreshDevices: () => Promise.resolve(state),
+      startAnc: () => Promise.resolve(state),
+      stopAnc: () => Promise.resolve(state),
+      runSelfTest: () => Promise.resolve(state),
+      startBridge: () => Promise.resolve(state),
+      stopBridge: () => Promise.resolve(state),
+      scanRokuDevices: () => Promise.resolve(state),
+      pingServer: (options) => { pingCalls.push(options); return Promise.resolve(state) },
+      recentLogs: () => Promise.resolve([]),
+      copy: () => Promise.resolve(true),
+      openExternal: () => Promise.resolve(true),
+      onState: (callback) => { renderState = callback; return () => {} },
+      onLog: () => () => {},
+    }
+
+    const window = { rokuDesktop: api }
+    const source = fs.readFileSync(path.join(ROOT, 'desktop', 'renderer.js'), 'utf8')
+    vm.runInNewContext(source, {
+      window,
+      document,
+      navigator: { clipboard: { writeText: () => Promise.resolve() } },
+      console,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      fetch: () => Promise.reject(new Error('no network in this test')),
+      performance,
+      URL,
+    })
+
+    assert.equal(typeof renderState, 'function', 'renderer never subscribed to state')
+    renderState(state)
+
+    const list = elements.get('roku-device-list')
+    assert.equal(list.children.length, 2, 'both Rokus should render as cards')
+    const firstCard = list.children[0]
+    assert.equal(firstCard.dataset.url, 'http://192.168.1.100:8060')
+    assert.equal(firstCard.attributes['aria-selected'], 'true', 'configured Roku must be selected')
+    const firstText = firstCard.textContent
+    for (const expected of ['Living Room TV (Bedroom)', 'Bedroom', 'Roku Smart Soundbar 9101X',
+      'Wi-Fi: Example Wi-Fi', 'Active: YouTube', '14 ms']) {
+      assert.ok(firstText.includes(expected), `card missing "${expected}": ${firstText}`)
+    }
+    // The AirPlay badge is a styled span, so it is appended rather than inline text.
+    const ready = firstCard.children[1].children[1].children
+      .filter((node) => node.className === 'airplay-ready')
+    assert.equal(ready.length, 1, 'AirPlay Ready badge missing')
+    assert.equal(ready[0].textContent, ' · AirPlay Ready')
+    // A TV without AirPlay keeps the model line and drops the badge.
+    const secondCard = list.children[1]
+    assert.ok(secondCard.textContent.includes('Roku Ultra 4802X'), secondCard.textContent)
+    assert.equal(secondCard.children[1].children[1].children
+      .filter((node) => node.className === 'airplay-ready').length, 0)
+
+    assert.equal(elements.get('ping-best').textContent, '462')
+    assert.equal(elements.get('ping-oneway').textContent, '231')
+    assert.equal(elements.get('ping-jitter').textContent, '21')
+    assert.equal(elements.get('ping-offset').textContent, '-231')
+    assert.equal(elements.get('ping-roku-oneway').textContent, '28')
+    assert.equal(elements.get('ping-lead').textContent, '3.848s')
+    assert.equal(elements.get('ping-mode').textContent, 'Japan simulation')
+
+    const pills = elements.get('ping-samples').children
+    assert.equal(pills.length, 2, 'one pill per sample')
+    assert.equal(pills[0].textContent, '#1: 483ms')
+    assert.equal(pills[1].textContent, '#2: 462ms ★')
+    assert.ok(pills[1].className.includes('best'), 'the selected sample must be highlighted')
+    assert.ok(elements.get('ping-formula').textContent.includes('Adaptive lead 3848 ms'))
+
+    // A second identical render must not rebuild the card list.
+    const before = list.children[0]
+    renderState(state)
+    assert.equal(list.children[0], before, 'device cards rebuilt without a state change')
+
+    // Selecting the other Roku moves the highlight when config changes.
+    renderState(Object.assign({}, state, {
+      config: Object.assign({}, state.config, { rokuUrl: 'http://192.168.1.50:8060' }),
+    }))
+    assert.equal(elements.get('roku-device-list').children[1].attributes['aria-selected'], 'true')
+    assert.equal(elements.get('roku-device-list').children[0].attributes['aria-selected'], 'false')
+
+    // The token badge reflects whether the token came off disk.
+    assert.equal(elements.get('token-source').textContent, 'Loaded from config file')
+    assert.deepEqual(elements.get('token-source').classList._set.size, 0)
+    renderState(Object.assign({}, state, { tokenFromConfigFile: false }))
+    assert.ok(elements.get('token-source').classList.contains('hidden'))
+
+    // The buttons must call the controller with the options their labels promise.
+    const sampleButton = (id) => elements.get(id).listeners.click[0]
+    await sampleButton('ping-live')()
+    assert.deepEqual(pingCalls.pop(), { samples: 5 })
+    await sampleButton('ping-japan')()
+    assert.deepEqual(pingCalls.pop(), { samples: 5, simulateAddedRttMs: 240, simulateJitterMs: 18 })
+    await sampleButton('copy-token')()
+    assert.equal(elements.get('copy-token').textContent, 'Copied!',
+      'the copy button must flash a confirmation')
   })
 
   console.log('desktop local UI server')

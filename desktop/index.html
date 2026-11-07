@@ -126,18 +126,27 @@
       </div>
 
       <div class="field">
-        <label for="room-token">Room token</label>
+        <div class="field-head">
+          <label for="room-token">Room token</label>
+          <span id="token-source" class="badge hidden">Loaded from config file</span>
+        </div>
         <div class="secret">
           <input id="room-token" type="password" spellcheck="false" autocomplete="off"
                  placeholder="room token from the relay">
           <button id="toggle-token" class="ghost small" type="button" aria-label="Show token">Show</button>
+          <button id="copy-token" class="ghost small" type="button" aria-label="Copy room token">Copy</button>
         </div>
         <p class="hint">Stored at <span id="config-path" class="mono">~/.config/roku-netflix-sync/desktop-config.json</span></p>
       </div>
 
       <div class="field">
-        <label for="roku-url">Roku LAN URL</label>
+        <div class="field-head">
+          <label for="roku-url">Roku LAN URL</label>
+          <button id="scan-roku" class="ghost small" type="button">Scan LAN for Rokus</button>
+        </div>
         <input id="roku-url" type="url" spellcheck="false" placeholder="http://192.168.1.100:8060">
+        <div id="roku-device-list" class="airplay-list" role="listbox" aria-label="Discovered Roku devices"></div>
+        <p id="roku-scan-summary" class="hint"></p>
       </div>
 
       <div class="roku-state">
@@ -160,6 +169,55 @@
         <button id="stop-bridge" class="secondary" type="button">Stop Roku Bridge</button>
       </div>
       <p id="bridge-error" class="error hidden"></p>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- Server RTT & Japan sync math simulator                            -->
+    <!-- ---------------------------------------------------------------- -->
+    <section class="card span-2" aria-labelledby="ping-title">
+      <div class="card-head">
+        <div>
+          <h2 id="ping-title">Server RTT &amp; Japan Sync Math Simulator</h2>
+          <p class="card-sub">Round-trip timing to the relay and the exact fire times for Roku and Chrome</p>
+        </div>
+        <span id="ping-mode" class="chip chip-idle">Not measured</span>
+      </div>
+
+      <div class="actions">
+        <button id="ping-live" class="primary" type="button">Ping Server Now (Live RTT)</button>
+        <button id="ping-japan" class="secondary" type="button">Simulate Japan Client (+240ms RTT)</button>
+      </div>
+      <p id="ping-error" class="error hidden"></p>
+
+      <div class="ping-stats">
+        <div class="stat">
+          <span class="stat-label">Best RTT (ms)</span>
+          <span id="ping-best" class="stat-value">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">One-Way Latency (ms)</span>
+          <span id="ping-oneway" class="stat-value">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Jitter (ms)</span>
+          <span id="ping-jitter" class="stat-value">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Clock Offset (ms)</span>
+          <span id="ping-offset" class="stat-value">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Roku LAN One-Way (ms)</span>
+          <span id="ping-roku-oneway" class="stat-value">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Adaptive Countdown</span>
+          <span id="ping-lead" class="stat-value">-</span>
+        </div>
+      </div>
+
+      <div id="ping-samples" class="ping-samples" aria-label="Individual ping samples"></div>
+      <pre id="ping-formula" class="formula">Run a ping to see the sync math.</pre>
     </section>
   </main>
 
