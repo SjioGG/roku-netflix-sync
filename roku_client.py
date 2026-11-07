@@ -19,6 +19,8 @@ Environment::
     SYNC_TOKEN        relay room token        (required unless the relay is open)
     ROKU_URL          Roku ECP base URL       (default http://192.168.1.100:8060)
     ROKU_CLIENT_POLL_MS  delay between polls  (default 300)
+    ROKU_CLIENT_STATUS_JSON  1 to print one JSON status line per poll, which is
+                     what the Electron desktop app parses (default off)
 """
 import json
 import os
@@ -185,23 +187,48 @@ def run_once(server_url, token, roku_url):
     return {'state': state, 'commands': len(commands), 'executed': executed}
 
 
+def status_line(summary):
+    """One machine-readable status line for the desktop app.
+
+    Kept flat and small: the Electron controller only needs the connection
+    state, the active app and the reported position.
+    """
+    state = summary.get('state') or {}
+    return json.dumps({'event': 'status', 'roku': state.get('roku'),
+                       'app_id': state.get('app_id'), 'app_name': state.get('app_name'),
+                       'position_ms': state.get('position_ms'),
+                       'roku_poll_ms': state.get('roku_poll_ms'),
+                       'error': state.get('error'),
+                       'commands': summary.get('commands', 0)})
+
+
 def run_forever(server_url=None, token=None, roku_url=None, poll_ms=None):
     """Poll the Roku and serve relay commands until interrupted."""
     server_url = server_url or os.environ.get('SYNC_SERVER_URL', DEFAULT_SERVER_URL)
     token = token if token is not None else os.environ.get('SYNC_TOKEN', '')
     roku_url = roku_url or os.environ.get('ROKU_URL', DEFAULT_ROKU_URL)
     poll_ms = poll_ms or int(os.environ.get('ROKU_CLIENT_POLL_MS', str(DEFAULT_POLL_MS)))
+    status_json = os.environ.get('ROKU_CLIENT_STATUS_JSON', '') not in ('', '0', 'false')
+    if status_json:
+        print(json.dumps({'event': 'start', 'server_url': server_url, 'roku_url': roku_url}),
+              flush=True)
     if not token:
         print('SYNC_TOKEN is not set; the relay will reject the bridge. Set it to the room token.', file=sys.stderr, flush=True)
-    print('Roku bridge client: %s -> %s (Roku %s)' % (roku_url, server_url, roku_url), flush=True)
+    if not status_json:
+        print('Roku bridge client: %s -> %s (Roku %s)' % (roku_url, server_url, roku_url), flush=True)
     while True:
         try:
-            run_once(server_url, token, roku_url)
+            summary = run_once(server_url, token, roku_url)
+            if status_json:
+                print(status_line(summary), flush=True)
             time.sleep(max(0.05, poll_ms / 1000))
         except KeyboardInterrupt:
             return
         except (OSError, urllib.error.URLError, ValueError) as exc:
             print('Roku bridge cycle failed: %s' % exc, file=sys.stderr, flush=True)
+            if status_json:
+                print(json.dumps({'event': 'status', 'roku': 'error', 'error': str(exc)}),
+                      flush=True)
             time.sleep(2)
 
 

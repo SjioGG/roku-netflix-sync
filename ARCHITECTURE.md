@@ -11,6 +11,7 @@ Tracked in Linear under **Beeros (`BEE`) → `Build: Software`**:
 - **Multi-App Streaming Support:** [BEE-229: Add YouTube, Plex, and universal HTML5 streaming app support](https://linear.app/beeros/issue/BEE-229)
 - **Roku Load Readiness:** [BEE-230: Harden Roku load readiness (60s patience, auto-retry, pre-start settle)](https://linear.app/beeros/issue/BEE-230)
 - **Cloud Relay & Roku Bridge:** [BEE-231: Host the relay in the cloud with a home-network Roku bridge client](https://linear.app/beeros/issue/BEE-231)
+- **Smart Device Discovery & Desktop App:** [BEE-232: Smart audio-device auto-discovery and an Electron control center for the ANC daemon and Roku bridge](https://linear.app/beeros/issue/BEE-232)
 
 ---
 
@@ -277,3 +278,71 @@ MacBook Pro Microphone ──► d(n) = voice + TV ─┤ aec_daemon.py --live  
 **Measured on this machine** (stdlib path, no numpy): 5x realtime at 16 kHz and
 9x at 8 kHz, 73–79 dB ERLE after four seconds of synthetic TV audio, exact lag
 recovery at ±500 ms, and about 3% of one core for the periodic delay re-estimate.
+
+### E. Smart Audio Device Discovery + Desktop Control Center ([BEE-232](https://linear.app/beeros/issue/BEE-232))
+
+Two halves: the daemon learns to pick its own devices, and both long-running
+processes get a GUI.
+
+**1. `discover_audio_devices()` / `auto_select_devices()`**
+
+```python
+{'inputs':  [{'index': 0, 'name': 'MacBook Pro Microphone', 'kind': 'builtin', 'channels': 1}],
+ 'outputs': [{'index': 3, 'name': 'ZoomAudioDevice', 'kind': 'virtual', 'channels': 2}],
+ 'source': 'system_profiler',
+ 'recommended': {'mic_device': ..., 'ref_device': ..., 'out_device': ..., 'notes': [...]}}
+```
+
+`kind` comes from the name first (`BlackHole`/`ZoomAudioDevice`/`Soundflower`/
+`Loopback`/`VB-Cable`/`Existential` → `virtual`; `iPhone`/`iPad`/`Continuity` →
+`continuity`; `MacBook`/`Built-in`/`Internal` → `builtin`; everything else that
+exposes an input → `usb`), with the CoreAudio transport as the tie-breaker, so
+classification behaves identically through `sounddevice` and the `system_profiler`
+fallback used on a bare `python3`.
+
+Selection order is what makes hot-plugging work with no configuration:
+
+1. **Microphone**: a saved preference if that device is currently connected, then
+   any `usb` input, then `builtin`. A `virtual` or `continuity` device is never
+   chosen implicitly, so neither the Zoom loopback nor `iPhone Microphone` can
+   become the physical mic by accident. `--no-prefer-usb` inverts the first two
+   when the user pins the built-in mic.
+2. **Reference / virtual mic**: `BlackHole 2ch` for the reference and
+   `ZoomAudioDevice` (else `BlackHole 16ch`) for the clean output when two virtual
+   devices exist. With only one, both directions use it and `notes` carries the
+   `brew install --cask blackhole-2ch` explanation. With none, `notes` asks for
+   BlackHole and the two device fields stay `None`.
+
+`--live` always runs auto-selection for any device flag it was not given, and
+`--live --json` emits one JSON object per report (`{"event": "telemetry",
+"delay_ms": ..., "erle_db": ..., "double_talk": ..., "mic_device": ...}`) for the
+desktop app.
+
+**2. `desktop/`**
+
+```
+desktop/index.html + renderer.js + styles.css     two cards, dark mode
+        │  window.rokuDesktop (IPC in Electron, fetch in a browser)
+desktop/main.js        BrowserWindow, ipcMain.handle, 4 s device poll
+desktop/preload.js     contextBridge surface (contextIsolation, no node in renderer)
+desktop/controller.cjs config, discovery, ANC + bridge children, self-test
+desktop/server.cjs     same controller behind http://127.0.0.1:8767
+bin/launch-desktop.sh  Electron → cached Electron → Chrome --app
+```
+
+`controller.cjs` imports no Electron API. That is the seam that lets
+`tests/desktop-app.cjs` exercise every behaviour with plain `node` and no display
+server, and it is why the web fallback is the same application rather than a
+second implementation. Config lives at
+`~/.config/roku-netflix-sync/desktop-config.json` and is written atomically
+through a temporary file, with a corrupt file degrading to defaults.
+
+The ANC card mirrors the daemon's own recommendation (`--list-devices --json`
+with the saved `--prefer-*-device` flags), so the UI can never claim a device
+that `--live` would not actually open. Children are stopped with `SIGTERM` and a
+3 s `SIGKILL` backstop on quit.
+
+**Known limits**: `sounddevice` is still required for live capture, so without it
+the Start ANC button reports the `pip install sounddevice` hint rather than
+streaming; ffmpeg-device *indices* remain positional and are not part of the
+automatic pick.

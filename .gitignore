@@ -5,3 +5,5 @@ recordings/
 *.pem
 *.crx
 .env
+desktop/node_modules/
+desktop/.electron-cache/

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+  <title>Roku Sync</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div>
+        <h1>Roku Sync</h1>
+        <p class="subtitle">TV echo canceller &amp; LAN bridge control center</p>
+      </div>
+    </div>
+    <div class="titlebar-actions">
+      <span id="connection-chip" class="chip chip-idle">Idle</span>
+      <button id="refresh-devices" class="ghost" type="button" title="Re-scan audio devices">Rescan devices</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- ---------------------------------------------------------------- -->
+    <!-- ANC Microphone Studio                                             -->
+    <!-- ---------------------------------------------------------------- -->
+    <section class="card" aria-labelledby="anc-title">
+      <div class="card-head">
+        <div>
+          <h2 id="anc-title">ANC Microphone Studio</h2>
+          <p class="card-sub">TV echo canceller for Messenger, Discord and Zoom calls</p>
+        </div>
+        <span id="anc-status" class="chip chip-idle">Stopped</span>
+      </div>
+
+      <div class="field">
+        <div class="field-head">
+          <label for="mic-select">Microphone (near end)</label>
+          <span id="mic-badge" class="badge">Auto</span>
+        </div>
+        <select id="mic-select" aria-describedby="mic-help"></select>
+        <p id="mic-help" class="hint">
+          The physical mic that hears your voice plus the TV bleed from the soundbar.
+        </p>
+        <label class="checkbox">
+          <input type="checkbox" id="auto-pick-soundcard">
+          <span>Auto-prefer USB soundcard when plugged in</span>
+        </label>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="ref-select">TV reference loopback</label>
+          <select id="ref-select"></select>
+          <p class="hint">Silent digital copy of the synced episode (Chrome tab).</p>
+        </div>
+        <div class="field">
+          <label for="out-select">Virtual mic output for Messenger</label>
+          <select id="out-select"></select>
+          <p class="hint">The device you select as the microphone inside your call app.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        In Messenger / Discord mic settings, select the <strong>Virtual Mic Output</strong>
+        device above. <code>ZoomAudioDevice</code> is already installed on your Mac and shows
+        up directly inside Messenger's microphone dropdown.
+      </div>
+
+      <div id="device-warning" class="warning hidden" role="status">
+        <div class="warning-text">
+          <strong>Only one virtual audio device detected.</strong>
+          <span id="device-warning-body"></span>
+        </div>
+        <div class="warning-actions">
+          <code id="brew-command">brew install --cask blackhole-2ch</code>
+          <button id="copy-brew" class="ghost small" type="button">Copy</button>
+        </div>
+      </div>
+
+      <div class="meters">
+        <div class="meter">
+          <span class="meter-label">Measured TV delay</span>
+          <span id="delay-value" class="meter-value">0.0 <small>ms</small></span>
+          <div class="meter-track"><div id="delay-bar" class="meter-fill accent"></div></div>
+        </div>
+        <div class="meter">
+          <span class="meter-label">Echo suppression</span>
+          <span id="erle-value" class="meter-value">0.0 <small>dB</small></span>
+          <div class="meter-track"><div id="erle-bar" class="meter-fill good"></div></div>
+        </div>
+        <div class="meter">
+          <span class="meter-label">Voice / double-talk</span>
+          <span id="talk-value" class="meter-value">Cancelling TV</span>
+          <div class="meter-track"><div id="talk-bar" class="meter-fill warn"></div></div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="start-anc" class="primary" type="button">Start ANC</button>
+        <button id="stop-anc" class="secondary" type="button">Stop ANC</button>
+        <button id="run-selftest" class="ghost" type="button">Run 4s DSP self-test</button>
+      </div>
+      <p id="selftest-result" class="hint mono"></p>
+      <p id="anc-error" class="error hidden"></p>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- Roku TV Bridge                                                    -->
+    <!-- ---------------------------------------------------------------- -->
+    <section class="card" aria-labelledby="bridge-title">
+      <div class="card-head">
+        <div>
+          <h2 id="bridge-title">Roku TV Bridge</h2>
+          <p class="card-sub">Relay commands from <span class="mono">your-relay.example</span> to the TV on this LAN</p>
+        </div>
+        <span id="bridge-status" class="chip chip-idle">Stopped</span>
+      </div>
+
+      <div class="field">
+        <label for="server-url">Sync server URL</label>
+        <input id="server-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:8766">
+      </div>
+
+      <div class="field">
+        <label for="room-token">Room token</label>
+        <div class="secret">
+          <input id="room-token" type="password" spellcheck="false" autocomplete="off"
+                 placeholder="room token from the relay">
+          <button id="toggle-token" class="ghost small" type="button" aria-label="Show token">Show</button>
+        </div>
+        <p class="hint">Stored at <span id="config-path" class="mono">~/.config/roku-netflix-sync/desktop-config.json</span></p>
+      </div>
+
+      <div class="field">
+        <label for="roku-url">Roku LAN URL</label>
+        <input id="roku-url" type="url" spellcheck="false" placeholder="http://192.168.1.100:8060">
+      </div>
+
+      <div class="roku-state">
+        <div class="stat">
+          <span class="stat-label">Player</span>
+          <span id="roku-player" class="stat-value">unknown</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">App</span>
+          <span id="roku-app" class="stat-value">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Position</span>
+          <span id="roku-position" class="stat-value">-</span>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="start-bridge" class="primary" type="button">Start Roku Bridge</button>
+        <button id="stop-bridge" class="secondary" type="button">Stop Roku Bridge</button>
+      </div>
+      <p id="bridge-error" class="error hidden"></p>
+    </section>
+  </main>
+
+  <section class="card log-card" aria-labelledby="log-title">
+    <div class="card-head">
+      <h2 id="log-title">Activity</h2>
+      <button id="clear-log" class="ghost small" type="button">Clear</button>
+    </div>
+    <pre id="log" class="log" aria-live="polite"></pre>
+  </section>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

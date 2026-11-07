@@ -20,17 +20,24 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p 'test_*.py'
           for test in tests/*.cjs; do node "$test" || exit 1; done
+          test -f tests/desktop-app.cjs
 
       - name: Package Chrome MV3 extension
         run: ./bin/package-extension.sh
 
       - name: Package server release bundle
         run: |
-          mkdir -p release-bundle
+          mkdir -p release-bundle/desktop release-bundle/bin
           cp sync_server.py roku_client.py roku_dashboard.py aec_daemon.py dashboard.html README.md ARCHITECTURE.md release-bundle/
           cp dist/roku-netflix-sync-extension.zip release-bundle/
+          cp desktop/package.json desktop/main.js desktop/preload.js desktop/controller.cjs \
+             desktop/server.cjs desktop/index.html desktop/renderer.js desktop/styles.css release-bundle/desktop/
+          cp bin/package-extension.sh bin/launch-desktop.sh release-bundle/bin/
+          chmod +x release-bundle/bin/*.sh
           tar czf build.tar.gz -C release-bundle .
           tar tzf build.tar.gz | grep -qx './aec_daemon.py' || { echo 'aec_daemon.py missing from build.tar.gz' >&2; exit 1; }
+          tar tzf build.tar.gz | grep -qx './desktop/controller.cjs' || { echo 'desktop/controller.cjs missing from build.tar.gz' >&2; exit 1; }
+          tar tzf build.tar.gz | grep -qx './bin/launch-desktop.sh' || { echo 'bin/launch-desktop.sh missing from build.tar.gz' >&2; exit 1; }
 
       - name: Resolve release tag
         id: tag

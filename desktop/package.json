@@ -1,0 +1,13 @@
+{
+  "name": "roku-sync-desktop",
+  "version": "0.3.2",
+  "description": "Control center for the Roku LAN bridge and the ANC microphone daemon",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}

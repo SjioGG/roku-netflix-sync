@@ -8,6 +8,7 @@ both implementations are still covered.
 import array
 import contextlib
 import io
+import json
 import math
 import os
 import random
@@ -499,6 +500,332 @@ class StdlibPathTest(unittest.TestCase):
         # The PHAT surface at the true lag must be the strongest positive peak.
         peak = max(range(1, 40), key=lambda lag: correlation[lag])
         self.assertEqual(peak, 10)
+
+
+def device(name, kind, channels=1, index=0):
+    """A discovery input/output entry, shaped like ``discover_audio_devices``."""
+    return {'index': index, 'name': name, 'kind': kind, 'channels': channels}
+
+
+def device_set(names, outputs=('MacBook Pro Speakers',)):
+    """Build a discovery dict from ``(name, kind, index)`` input tuples."""
+    inputs = [device(name, kind, 1, index) for index, (name, kind) in enumerate(names)]
+    outs = []
+    for index, name in enumerate(outputs):
+        kind = 'builtin' if 'MacBook' in name else 'virtual'
+        outs.append(device(name, kind, 2, len(inputs) + index))
+    return {'inputs': inputs, 'outputs': outs}
+
+
+# The physical setup this ticket is about: a MacBook, a Continuity iPhone mic,
+# Zoom's virtual device, and an optional Focusrite USB soundcard.
+USB_SET = (('Focusrite Scarlett 2i2 USB', 'usb'), ('MacBook Pro Microphone', 'builtin'),
+           ('iPhone Microphone', 'continuity'), ('ZoomAudioDevice', 'virtual'))
+UNPLUGGED_SET = (('MacBook Pro Microphone', 'builtin'),
+                 ('iPhone Microphone', 'continuity'), ('ZoomAudioDevice', 'virtual'))
+
+
+class DeviceClassifyTest(unittest.TestCase):
+    def test_names_are_classified_by_kind(self):
+        self.assertEqual(aec.classify_device('BlackHole 2ch'), 'virtual')
+        self.assertEqual(aec.classify_device('ZoomAudioDevice'), 'virtual')
+        self.assertEqual(aec.classify_device('Soundflower (2ch)'), 'virtual')
+        self.assertEqual(aec.classify_device('Loopback Audio'), 'virtual')
+        self.assertEqual(aec.classify_device('VB-Cable'), 'virtual')
+        self.assertEqual(aec.classify_device('Existential Audio Device'), 'virtual')
+        self.assertEqual(aec.classify_device('iPhone Microphone'), 'continuity')
+        self.assertEqual(aec.classify_device('iPad Microphone'), 'continuity')
+        self.assertEqual(aec.classify_device('Continuity Capture Mic'), 'continuity')
+        self.assertEqual(aec.classify_device('MacBook Pro Microphone'), 'builtin')
+        self.assertEqual(aec.classify_device('Built-in Microphone'), 'builtin')
+        self.assertEqual(aec.classify_device('Internal Microphone'), 'builtin')
+
+    def test_external_soundcards_are_usb(self):
+        for name in ('Focusrite Scarlett 2i2 USB', 'USB PnP Sound Device',
+                     'Sound Blaster Play! 3', 'Rode NT-USB', 'Shure MV7',
+                     'Steinberg UR22C', 'Behringer UMC202HD', 'Audio-Technica AT2020USB',
+                     'Blue Yeti', 'External Microphone', 'USB Audio Codec',
+                     'Scarlett Solo Audio Interface'):
+            self.assertEqual(aec.classify_device(name), 'usb', name)
+
+    def test_transport_breaks_ties_for_generic_names(self):
+        self.assertEqual(aec.classify_device('Aggregate Device',
+                                             'coreaudio_device_type_virtual'), 'virtual')
+        self.assertEqual(aec.classify_device('Aggregate Device',
+                                             'coreaudio_device_type_builtin'), 'builtin')
+
+
+class AutoSelectDevicesTest(unittest.TestCase):
+    """Auto-selection is the heart of BEE-232: plugging the soundcard in wins."""
+
+    def test_usb_soundcard_beats_builtin_continuity_and_virtual(self):
+        picked = aec.auto_select_devices(device_set(USB_SET))
+        self.assertEqual(picked['mic_device'], 'Focusrite Scarlett 2i2 USB')
+        self.assertEqual(picked['mic_kind'], 'usb')
+        self.assertEqual(picked['mic_source'], 'usb')
+
+    def test_usb_pnp_sound_device_is_also_auto_picked(self):
+        devices = device_set((('USB PnP Sound Device', 'usb'),
+                             ('MacBook Pro Microphone', 'builtin'),
+                             ('iPhone Microphone', 'continuity')))
+        picked = aec.auto_select_devices(devices)
+        self.assertEqual(picked['mic_device'], 'USB PnP Sound Device')
+
+    def test_unplugging_the_soundcard_falls_back_to_the_macbook_mic(self):
+        plugged = aec.auto_select_devices(device_set(USB_SET))
+        unplugged = aec.auto_select_devices(device_set(UNPLUGGED_SET))
+        self.assertEqual(plugged['mic_device'], 'Focusrite Scarlett 2i2 USB')
+        self.assertEqual(unplugged['mic_device'], 'MacBook Pro Microphone')
+        self.assertEqual(unplugged['mic_kind'], 'builtin')
+        # Continuity and virtual devices must never be picked as the physical mic.
+        self.assertNotEqual(unplugged['mic_device'], 'iPhone Microphone')
+        self.assertNotEqual(unplugged['mic_device'], 'ZoomAudioDevice')
+
+    def test_preferred_mic_wins_when_still_connected(self):
+        preferred = {'mic_device': 'MacBook Pro Microphone'}
+        picked = aec.auto_select_devices(device_set(USB_SET), preferred)
+        self.assertEqual(picked['mic_device'], 'MacBook Pro Microphone')
+        self.assertEqual(picked['mic_source'], 'preferred')
+
+    def test_preferred_mic_that_is_gone_falls_back_and_notes_it(self):
+        preferred = {'mic_device': 'Focusrite Scarlett 2i2 USB'}
+        picked = aec.auto_select_devices(device_set(UNPLUGGED_SET), preferred)
+        self.assertEqual(picked['mic_device'], 'MacBook Pro Microphone')
+        self.assertTrue(any('not connected' in note for note in picked['notes']))
+
+    def test_preferred_virtual_mic_is_honoured_when_explicitly_asked(self):
+        preferred = {'mic_device': 'ZoomAudioDevice'}
+        picked = aec.auto_select_devices(device_set(UNPLUGGED_SET), preferred)
+        self.assertEqual(picked['mic_device'], 'ZoomAudioDevice')
+        self.assertEqual(picked['mic_source'], 'preferred')
+
+    def test_two_virtual_devices_split_reference_and_output(self):
+        devices = device_set(USB_SET, outputs=('BlackHole 2ch', 'BlackHole 16ch',
+                                              'ZoomAudioDevice', 'MacBook Pro Speakers'))
+        picked = aec.auto_select_devices(devices)
+        self.assertEqual(picked['ref_device'], 'BlackHole 2ch')
+        self.assertEqual(picked['out_device'], 'ZoomAudioDevice')
+        self.assertFalse(any('Only one virtual' in note for note in picked['notes']))
+
+    def test_blackhole_16ch_is_the_output_when_zoom_is_absent(self):
+        devices = device_set((('Focusrite Scarlett 2i2 USB', 'usb'),
+                              ('MacBook Pro Microphone', 'builtin')),
+                             outputs=('BlackHole 2ch', 'BlackHole 16ch',
+                                      'MacBook Pro Speakers'))
+        picked = aec.auto_select_devices(devices)
+        self.assertEqual(picked['ref_device'], 'BlackHole 2ch')
+        self.assertEqual(picked['out_device'], 'BlackHole 16ch')
+
+    def test_single_virtual_device_warns_with_the_brew_command(self):
+        picked = aec.auto_select_devices(device_set(UNPLUGGED_SET))
+        self.assertEqual(picked['ref_device'], 'ZoomAudioDevice')
+        self.assertEqual(picked['out_device'], 'ZoomAudioDevice')
+        warnings = [note for note in picked['notes'] if 'Only one virtual audio device' in note]
+        self.assertEqual(len(warnings), 1, picked['notes'])
+        self.assertIn('ZoomAudioDevice', warnings[0])
+        self.assertIn('brew install --cask blackhole-2ch', warnings[0])
+
+    def test_no_virtual_device_asks_for_blackhole(self):
+        devices = device_set((('MacBook Pro Microphone', 'builtin'),),
+                             outputs=('MacBook Pro Speakers',))
+        picked = aec.auto_select_devices(devices)
+        self.assertIsNone(picked['ref_device'])
+        self.assertIsNone(picked['out_device'])
+        self.assertTrue(any('brew install --cask blackhole-2ch' in note
+                            for note in picked['notes']))
+
+    def test_preferred_reference_and_output_are_kept(self):
+        devices = device_set(USB_SET, outputs=('BlackHole 2ch', 'BlackHole 16ch',
+                                              'ZoomAudioDevice'))
+        preferred = {'ref_device': 'ZoomAudioDevice', 'out_device': 'BlackHole 16ch'}
+        picked = aec.auto_select_devices(devices, preferred)
+        self.assertEqual(picked['ref_device'], 'ZoomAudioDevice')
+        self.assertEqual(picked['out_device'], 'BlackHole 16ch')
+
+    def test_accepts_a_bare_list_of_inputs(self):
+        entries = [device('Focusrite Scarlett 2i2 USB', 'usb'),
+                   device('MacBook Pro Microphone', 'builtin')]
+        picked = aec.auto_select_devices(entries)
+        self.assertEqual(picked['mic_device'], 'Focusrite Scarlett 2i2 USB')
+
+    def test_empty_device_list_is_safe(self):
+        picked = aec.auto_select_devices({'inputs': [], 'outputs': []})
+        self.assertIsNone(picked['mic_device'])
+        self.assertIsNone(picked['ref_device'])
+        self.assertIsNone(picked['out_device'])
+        self.assertTrue(picked['notes'])
+
+
+class DiscoverAudioDevicesTest(unittest.TestCase):
+    """``discover_audio_devices`` must be structured, JSON-ready and host-safe."""
+
+    def _fake_module(self, devices):
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices():
+                return devices
+        return FakeSoundDevice()
+
+    def test_structure_matches_the_documented_shape(self):
+        module = self._fake_module([
+            {'name': 'MacBook Pro Microphone', 'max_input_channels': 1,
+             'max_output_channels': 0},
+            {'name': 'Focusrite Scarlett 2i2 USB', 'max_input_channels': 2,
+             'max_output_channels': 2},
+            {'name': 'ZoomAudioDevice', 'max_input_channels': 2,
+             'max_output_channels': 2},
+        ])
+        found = aec.discover_audio_devices(module=module)
+        self.assertEqual(set(found), {'inputs', 'outputs', 'recommended', 'source'})
+        self.assertEqual(found['source'], 'sounddevice')
+        self.assertEqual([entry['name'] for entry in found['inputs']],
+                         ['MacBook Pro Microphone', 'Focusrite Scarlett 2i2 USB',
+                          'ZoomAudioDevice'])
+        self.assertEqual([entry['name'] for entry in found['outputs']],
+                         ['Focusrite Scarlett 2i2 USB', 'ZoomAudioDevice'])
+        for entry in found['inputs']:
+            self.assertEqual(set(entry), {'index', 'name', 'kind', 'channels'})
+            self.assertIn(entry['kind'], ('usb', 'builtin', 'virtual', 'continuity'))
+            self.assertIsInstance(entry['index'], int)
+            self.assertIsInstance(entry['channels'], int)
+        self.assertEqual(found['inputs'][1]['kind'], 'usb')
+        self.assertEqual(found['inputs'][2]['kind'], 'virtual')
+        recommended = found['recommended']
+        for key in ('mic_device', 'ref_device', 'out_device', 'notes'):
+            self.assertIn(key, recommended)
+        self.assertEqual(recommended['mic_device'], 'Focusrite Scarlett 2i2 USB')
+        self.assertIsInstance(recommended['notes'], list)
+        json.dumps(found)  # must be serialisable for `--list-devices --json`
+
+    def test_empty_or_broken_backend_does_not_raise(self):
+        class Broken:
+            @staticmethod
+            def query_devices():
+                raise RuntimeError('no core audio')
+        saved = aec.platform.system
+        aec.platform.system = lambda: 'Linux'
+        try:
+            found = aec.discover_audio_devices(module=Broken())
+        finally:
+            aec.platform.system = saved
+        self.assertEqual(found['inputs'], [])
+        self.assertIn('recommended', found)
+
+    def test_cli_json_flag_prints_machine_readable_structure(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = aec.main(['--list-devices', '--json'])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertIn('inputs', payload)
+        self.assertIn('outputs', payload)
+        self.assertIn('recommended', payload)
+        self.assertIn('mic_device', payload['recommended'])
+
+    def test_list_devices_text_mode_mentions_the_recommendation(self):
+        stdout = io.StringIO()
+        code = aec.list_devices(stream=stdout)
+        self.assertIn(code, (0, 1))
+        self.assertIn('recommended: mic=', stdout.getvalue())
+
+
+class LiveAutoSelectionTest(unittest.TestCase):
+    """``--live --auto`` must open the auto-selected devices, not defaults."""
+
+    def _run(self, devices, argv):
+        opened = []
+
+        class FakeStream:
+            def __init__(self, device):
+                self.device = device
+                self.calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size):
+                self.calls += 1
+                if self.calls > 4:
+                    raise KeyboardInterrupt
+                return ([[0.01]] * size, None)
+
+            def write(self, data):
+                pass
+
+        class FakeSoundDevice:
+            @staticmethod
+            def InputStream(**kwargs):
+                opened.append(('in', kwargs['device']))
+                return FakeStream(kwargs['device'])
+
+            @staticmethod
+            def OutputStream(**kwargs):
+                opened.append(('out', kwargs['device']))
+                return FakeStream(kwargs['device'])
+
+            @staticmethod
+            def query_devices():
+                return devices
+
+        saved = aec._sd
+        aec._sd = FakeSoundDevice
+        self.addCleanup(setattr, aec, '_sd', saved)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = aec.main(argv)
+        return code, opened, stdout.getvalue()
+
+    DEVICES = [
+        {'name': 'Focusrite Scarlett 2i2 USB', 'max_input_channels': 2,
+         'max_output_channels': 2},
+        {'name': 'MacBook Pro Microphone', 'max_input_channels': 1,
+         'max_output_channels': 0},
+        {'name': 'ZoomAudioDevice', 'max_input_channels': 2,
+         'max_output_channels': 2},
+    ]
+
+    def test_live_auto_opens_the_usb_soundcard_reference_and_output(self):
+        code, opened, stdout = self._run(self.DEVICES, ['--live', '--auto', '--json'])
+        self.assertEqual(code, 0)
+        self.assertEqual(opened, [('in', 'ZoomAudioDevice'),
+                                  ('in', 'Focusrite Scarlett 2i2 USB'),
+                                  ('out', 'ZoomAudioDevice')])
+        start = json.loads(stdout.splitlines()[0])
+        self.assertEqual(start['event'], 'start')
+        self.assertEqual(start['mic_device'], 'Focusrite Scarlett 2i2 USB')
+        self.assertEqual(start['ref_device'], 'ZoomAudioDevice')
+        self.assertEqual(start['out_device'], 'ZoomAudioDevice')
+        self.assertTrue(any('brew install --cask blackhole-2ch' in note
+                            for note in start['notes']))
+        # Telemetry lines carry the live figures the desktop meters display.
+        telemetry = [json.loads(line) for line in stdout.splitlines()
+                     if '"telemetry"' in line]
+        self.assertTrue(telemetry)
+        for key in ('delay_ms', 'erle_db', 'double_talk', 'confidence',
+                    'mic_device', 'ref_device', 'out_device'):
+            self.assertIn(key, telemetry[0])
+
+    def test_live_without_flags_still_auto_selects(self):
+        code, opened, _ = self._run(self.DEVICES, ['--live', '--json'])
+        self.assertEqual(code, 0)
+        self.assertIn(('in', 'Focusrite Scarlett 2i2 USB'), opened)
+
+    def test_no_prefer_usb_keeps_the_builtin_mic(self):
+        code, opened, _ = self._run(self.DEVICES,
+                                    ['--live', '--auto', '--json', '--no-prefer-usb'])
+        self.assertEqual(code, 0)
+        self.assertIn(('in', 'MacBook Pro Microphone'), opened)
+        self.assertNotIn(('in', 'Focusrite Scarlett 2i2 USB'), opened)
+
+    def test_explicit_device_flag_beats_auto(self):
+        code, opened, _ = self._run(
+            self.DEVICES,
+            ['--live', '--auto', '--json', '--mic-device', 'MacBook Pro Microphone'])
+        self.assertEqual(code, 0)
+        self.assertIn(('in', 'MacBook Pro Microphone'), opened)
 
 
 class DeviceListTest(unittest.TestCase):

@@ -671,10 +671,333 @@ def process_wav_files(ref_path, mic_path, out_path, frame_size=DEFAULT_BLOCK_SIZ
 
 
 # ---------------------------------------------------------------------------
+# Device discovery and smart auto-selection
+# ---------------------------------------------------------------------------
+# Classification is name-first so it works the same whether the list came from
+# sounddevice, CoreAudio or a hand-written fixture in the tests. The transport
+# string is only a tie-breaker for devices with a generic name.
+VIRTUAL_DEVICE_HINTS = ('blackhole', 'zoomaudiodevice', 'soundflower', 'loopback',
+                        'vb-cable', 'vb-audio', 'existential')
+CONTINUITY_DEVICE_HINTS = ('iphone', 'ipad', 'continuity')
+BUILTIN_DEVICE_HINTS = ('macbook', 'built-in', 'builtin', 'internal')
+EXTERNAL_DEVICE_HINTS = ('scarlett', 'focusrite', 'usb', 'sound blaster', 'soundblaster',
+                         'rode', 'shure', 'steinberg', 'behringer', 'audio-technica',
+                         'external', 'codec', 'interface', 'soundcard', 'sound device',
+                         'yeti', 'blue mic')
+
+BLACKHOLE_2CH_NAME = 'BlackHole 2ch'
+BLACKHOLE_16CH_NAME = 'BlackHole 16ch'
+ZOOM_DEVICE_NAME = 'ZoomAudioDevice'
+
+# Reused verbatim by the desktop UI, so keep the two copies in step.
+BLACKHOLE_INSTALL_COMMAND = 'brew install --cask blackhole-2ch'
+
+
+def classify_device(name, transport=None):
+    """Bucket a device name as ``usb``, ``builtin``, ``virtual`` or ``continuity``.
+
+    The four kinds drive auto-selection: a virtual or Continuity device is never
+    picked as the physical microphone by accident, and an external soundcard
+    outranks the built-in mic whenever one is plugged in.
+    """
+    lowered = (name or '').lower()
+    for hint in VIRTUAL_DEVICE_HINTS:
+        if hint in lowered:
+            return 'virtual'
+    for hint in CONTINUITY_DEVICE_HINTS:
+        if hint in lowered:
+            return 'continuity'
+    for hint in BUILTIN_DEVICE_HINTS:
+        if hint in lowered:
+            return 'builtin'
+    transport_lower = (transport or '').lower()
+    if 'virtual' in transport_lower:
+        return 'virtual'
+    if 'builtin' in transport_lower:
+        return 'builtin'
+    for hint in EXTERNAL_DEVICE_HINTS:
+        if hint in lowered:
+            return 'usb'
+    # Anything else that exposes an input is a physical device: an unlabelled
+    # condenser mic, a headset or a capture dongle.
+    return 'usb'
+
+
+def _system_profiler_audio():
+    """CoreAudio devices from ``system_profiler -json SPAudioDataType``."""
+    if not shutil.which('system_profiler'):
+        return []
+    try:
+        result = subprocess.run(['system_profiler', '-json', 'SPAudioDataType'],
+                                capture_output=True, text=True, check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - host dependent
+        return []
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        payload = json.loads(result.stdout)
+    except ValueError:  # pragma: no cover - unexpected output
+        return []
+    entries = []
+    for group in payload.get('SPAudioDataType') or []:
+        if not isinstance(group, dict):
+            continue
+        for item in group.get('_items') or []:
+            if not isinstance(item, dict):
+                continue
+            name = item.get('_name')
+            if not name:
+                continue
+            try:
+                inputs = int(item.get('coreaudio_device_input') or 0)
+                outputs = int(item.get('coreaudio_device_output') or 0)
+            except (TypeError, ValueError):
+                continue
+            entries.append({'name': str(name), 'inputs': inputs, 'outputs': outputs,
+                            'transport': item.get('coreaudio_device_transport')})
+    return entries
+
+
+def _sounddevice_entries(module):
+    """``(inputs, outputs)`` device lists from a sounddevice-compatible module."""
+    try:
+        devices = list(module.query_devices())
+    except Exception:  # pragma: no cover - host dependent
+        return [], []
+    inputs, outputs = [], []
+    for index, device in enumerate(devices):
+        try:
+            name = str(device['name'])
+            in_channels = int(device['max_input_channels'] or 0)
+            out_channels = int(device['max_output_channels'] or 0)
+        except (KeyError, TypeError, ValueError):  # pragma: no cover - defensive
+            continue
+        kind = classify_device(name)
+        if in_channels:
+            inputs.append({'index': index, 'name': name, 'kind': kind,
+                           'channels': in_channels})
+        if out_channels:
+            outputs.append({'index': index, 'name': name, 'kind': kind,
+                            'channels': out_channels})
+    return inputs, outputs
+
+
+def discover_audio_devices(module=None, preferred=None, allow_external=True):
+    """Enumerate audio devices as a structured, JSON-ready dict.
+
+    Uses sounddevice when it is installed, then falls back to CoreAudio through
+    ``system_profiler``, so this works on a bare macOS ``python3`` with no pip
+    packages. ``recommended`` is always filled in from
+    :func:`auto_select_devices`.
+    """
+    backend = _sd if module is None else module
+    inputs, outputs = [], []
+    source = 'none'
+    if backend is not None:
+        inputs, outputs = _sounddevice_entries(backend)
+        if inputs or outputs:
+            source = 'sounddevice'
+    if not inputs and not outputs and platform.system() == 'Darwin':
+        for index, device in enumerate(_system_profiler_audio()):
+            kind = classify_device(device['name'], device.get('transport'))
+            if device['inputs']:
+                inputs.append({'index': index, 'name': device['name'], 'kind': kind,
+                               'channels': device['inputs']})
+            if device['outputs']:
+                outputs.append({'index': index, 'name': device['name'], 'kind': kind,
+                               'channels': device['outputs']})
+        if inputs or outputs:
+            source = 'system_profiler'
+    devices = {'inputs': inputs, 'outputs': outputs, 'source': source}
+    devices['recommended'] = auto_select_devices(devices, preferred,
+                                                 allow_external=allow_external)
+    return devices
+
+
+def _find_device(entries, name):
+    """Match a device by exact name, then case-insensitively, then by substring."""
+    if not name:
+        return None
+    for entry in entries:
+        if entry.get('name') == name:
+            return entry
+    lowered = str(name).lower()
+    for entry in entries:
+        if str(entry.get('name', '')).lower() == lowered:
+            return entry
+    for entry in entries:
+        if lowered and lowered in str(entry.get('name', '')).lower():
+            return entry
+    return None
+
+
+def _first_virtual(entries, needle):
+    for entry in entries:
+        if entry.get('kind') == 'virtual' and needle in str(entry.get('name', '')).lower():
+            return entry
+    return None
+
+
+def auto_select_devices(devices, preferred=None, allow_external=True):
+    """Pick ``mic_device``, ``ref_device`` and ``out_device`` from a device list.
+
+    ``devices`` is either the dict from :func:`discover_audio_devices` or a bare
+    list of input entries. ``preferred`` holds saved names from the desktop app;
+    a preferred device wins whenever it is still connected. ``allow_external``
+    is the desktop app's "auto-prefer USB soundcard" switch: turning it off lets
+    the built-in mic win while the soundcard is still an explicit fallback.
+
+    Priority:
+      1. microphone: saved preference, then any external (USB) soundcard, then
+         the built-in mic. Virtual and Continuity devices are only ever used
+         when explicitly preferred.
+      2. reference / virtual mic: ``BlackHole 2ch`` in, ``ZoomAudioDevice`` (or
+         ``BlackHole 16ch``) out, with a note when only one virtual device
+         exists and the same bus has to carry both directions.
+    """
+    if isinstance(devices, dict):
+        inputs = [entry for entry in (devices.get('inputs') or []) if isinstance(entry, dict)]
+        outputs = [entry for entry in (devices.get('outputs') or []) if isinstance(entry, dict)]
+    else:
+        inputs = [entry for entry in (devices or []) if isinstance(entry, dict)]
+        outputs = list(inputs)
+    preferred = dict(preferred or {})
+    notes = []
+
+    # -- microphone ---------------------------------------------------------
+    mic = _find_device(inputs, preferred.get('mic_device'))
+    mic_source = 'preferred' if mic is not None else None
+    if preferred.get('mic_device') and mic is None:
+        notes.append('Preferred microphone %r is not connected; using an automatic pick.'
+                     % preferred['mic_device'])
+    order = ('usb', 'builtin') if allow_external else ('builtin', 'usb')
+    for kind in order:
+        if mic is not None:
+            break
+        for entry in inputs:
+            if entry.get('kind') == kind:
+                mic, mic_source = entry, kind
+                break
+    if mic is None:
+        notes.append('No physical microphone was found. Plug in a USB soundcard or '
+                     'check System Settings > Sound > Input.')
+
+    # -- virtual reference and virtual microphone output ---------------------
+    virtual_names = []
+    for entry in inputs + outputs:
+        if entry.get('kind') == 'virtual' and entry.get('name') not in virtual_names:
+            virtual_names.append(entry.get('name'))
+
+    def virtual_by_name(name):
+        return _find_device(outputs, name) or _find_device(inputs, name)
+
+    blackhole_2ch = virtual_by_name(BLACKHOLE_2CH_NAME)
+    blackhole_16ch = virtual_by_name(BLACKHOLE_16CH_NAME)
+    zoom = virtual_by_name(ZOOM_DEVICE_NAME)
+
+    preferred_ref = _find_device(inputs, preferred.get('ref_device')) \
+        or _find_device(outputs, preferred.get('ref_device'))
+    ref_device = preferred_ref.get('name') if preferred_ref else None
+    ref_source = 'preferred' if ref_device else None
+    if preferred.get('ref_device') and preferred_ref is None:
+        notes.append('Preferred reference device %r is not connected; using an automatic pick.'
+                     % preferred['ref_device'])
+
+    preferred_out = _find_device(outputs, preferred.get('out_device')) \
+        or _find_device(inputs, preferred.get('out_device'))
+    out_device = preferred_out.get('name') if preferred_out else None
+    out_source = 'preferred' if out_device else None
+    if preferred.get('out_device') and preferred_out is None:
+        notes.append('Preferred output device %r is not connected; using an automatic pick.'
+                     % preferred['out_device'])
+
+    if len(virtual_names) >= 2:
+        if ref_device is None:
+            fallback = blackhole_2ch or zoom
+            if fallback is None:
+                fallback = next((entry for entry in outputs + inputs
+                                 if entry.get('name') in virtual_names
+                                 and entry.get('name') != BLACKHOLE_16CH_NAME), None)
+            ref_device = fallback.get('name') if fallback else None
+            ref_source = 'virtual' if ref_device else None
+        if out_device is None:
+            fallback = zoom or blackhole_16ch
+            if fallback is None:
+                fallback = next((entry for entry in outputs + inputs
+                                 if entry.get('name') in virtual_names
+                                 and entry.get('name') != ref_device), None)
+            out_device = fallback.get('name') if fallback else None
+            out_source = 'virtual' if out_device else None
+        if ref_device and out_device:
+            notes.append('Reference input uses %s; the Messenger virtual microphone uses %s.'
+                         % (ref_device, out_device))
+    elif len(virtual_names) == 1:
+        only = virtual_names[0]
+        if ref_device is None:
+            ref_device, ref_source = only, 'virtual'
+        if out_device is None:
+            out_device, out_source = only, 'virtual'
+        notes.append('Only one virtual audio device (%s) is installed. Install BlackHole 2ch '
+                     '(%s) so Chrome reference audio and Messenger virtual mic output use '
+                     'separate buses.' % (only, BLACKHOLE_INSTALL_COMMAND))
+    else:
+        notes.append('No virtual audio device found. Install BlackHole 2ch (%s) so Chrome '
+                     'can route a silent reference copy of the episode into the echo '
+                     'canceller and the clean voice can be offered to Messenger.'
+                     % BLACKHOLE_INSTALL_COMMAND)
+        if ref_device is None:
+            ref_source = None
+        if out_device is None:
+            out_source = None
+
+    if mic is not None and mic_source == 'usb':
+        notes.append('External soundcard %r selected automatically; the built-in mic is '
+                     'ignored while it is plugged in.' % mic['name'])
+
+    return {
+        'mic_device': mic['name'] if mic else None,
+        'ref_device': ref_device,
+        'out_device': out_device,
+        'notes': notes,
+        'mic_kind': mic.get('kind') if mic else None,
+        'mic_source': mic_source,
+        'ref_source': ref_source,
+        'out_source': out_source,
+        'virtual_devices': virtual_names,
+    }
+
+
+def resolve_live_devices(preferred=None, allow_external=True):
+    """Discover devices and return ``(recommended, discovery)`` for ``--live``."""
+    discovery = discover_audio_devices()
+    return auto_select_devices(discovery, preferred,
+                               allow_external=allow_external), discovery
+
+
+# ---------------------------------------------------------------------------
 # Devices and live capture
 # ---------------------------------------------------------------------------
-def list_devices(stream=sys.stdout):
-    """Print the input/output devices the host exposes."""
+def list_devices(stream=None, json_output=False, preferred=None, allow_external=True):
+    """Print the input/output devices the host exposes.
+
+    With ``json_output`` the structured :func:`discover_audio_devices` payload is
+    written instead, which is what the desktop app consumes.
+    """
+    if stream is None:
+        stream = sys.stdout
+    if json_output:
+        discovery = discover_audio_devices(preferred=preferred,
+                                          allow_external=allow_external)
+        print(json.dumps(discovery, indent=2), file=stream)
+        return 0
+    discovery = discover_audio_devices(preferred=preferred,
+                                       allow_external=allow_external)
+    recommended = discovery['recommended']
+    print('recommended: mic=%s ref=%s out=%s'
+          % (recommended['mic_device'], recommended['ref_device'],
+             recommended['out_device']), file=stream)
+    for note in recommended['notes']:
+        print('note: %s' % note, file=stream)
     if _sd is not None:
         print('sounddevice devices:', file=stream)
         for index, device in enumerate(_sd.query_devices()):
@@ -724,11 +1047,34 @@ def _install_hint():
 
 def run_live(ref_device=None, mic_device=None, out_device=None,
              sample_rate=DEFAULT_SAMPLE_RATE, block_size=DEFAULT_BLOCK_SIZE,
-             report_every=4, **kwargs):
-    """Real-time loop: read reference + mic, write the cleaned voice."""
+             report_every=4, auto=True, json_output=False, preferred=None,
+             allow_external=True, **kwargs):
+    """Real-time loop: read reference + mic, write the cleaned voice.
+
+    Any device left as ``None`` is filled in by :func:`auto_select_devices`
+    unless ``auto`` is false, so ``--live`` alone works on a fresh Mac with a
+    USB soundcard and one virtual device installed.
+    """
     if _sd is None:
         raise RuntimeError(_install_hint())
+    notes = []
+    if auto:
+        recommendation = resolve_live_devices(preferred,
+                                             allow_external=allow_external)[0]
+        ref_device = ref_device if ref_device is not None else recommendation['ref_device']
+        mic_device = mic_device if mic_device is not None else recommendation['mic_device']
+        out_device = out_device if out_device is not None else recommendation['out_device']
+        notes = recommendation['notes']
     aec = AcousticEchoCanceller(sample_rate=sample_rate, **kwargs)
+    devices = {'mic_device': mic_device, 'ref_device': ref_device,
+               'out_device': out_device}
+    if json_output:
+        print(json.dumps(dict({'event': 'start'}, sample_rate=sample_rate,
+                              block_size=block_size, notes=notes, **devices)),
+              flush=True)
+    else:
+        for note in notes:
+            print('note: %s' % note)
     streams = [
         _sd.InputStream(device=ref_device, channels=1, samplerate=sample_rate,
                         blocksize=block_size, dtype='float32'),
@@ -738,8 +1084,9 @@ def run_live(ref_device=None, mic_device=None, out_device=None,
                          blocksize=block_size, dtype='float32'),
     ]
     reference, microphone, speaker = streams
-    print('AEC live: ref=%s mic=%s out=%s rate=%d block=%d'
-          % (ref_device, mic_device, out_device, sample_rate, block_size))
+    if not json_output:
+        print('AEC live: ref=%s mic=%s out=%s rate=%d block=%d'
+              % (ref_device, mic_device, out_device, sample_rate, block_size))
     try:
         with reference, microphone, speaker:
             frames = 0
@@ -751,11 +1098,18 @@ def run_live(ref_device=None, mic_device=None, out_device=None,
                 speaker.write(array.array('f', clean))
                 frames += 1
                 if report_every and frames % report_every == 0:
-                    print('delay %7.1f ms (conf %.2f)  ERLE %5.1f dB%s'
-                          % (stats['delay_ms'], stats['confidence'], stats['erle_db'],
-                             '  [double talk]' if stats['double_talk'] else ''))
+                    if json_output:
+                        print(json.dumps(dict({'event': 'telemetry'}, **stats, **devices)),
+                              flush=True)
+                    else:
+                        print('delay %7.1f ms (conf %.2f)  ERLE %5.1f dB%s'
+                              % (stats['delay_ms'], stats['confidence'], stats['erle_db'],
+                                 '  [double talk]' if stats['double_talk'] else ''))
     except KeyboardInterrupt:
         pass
+    finally:
+        if json_output:
+            print(json.dumps(dict({'event': 'stop'}, **aec.stats(), **devices)), flush=True)
     return aec.stats()
 
 
@@ -953,6 +1307,8 @@ def build_parser():
         description='Acoustic echo canceller that removes Roku TV audio from the MacBook mic.')
     parser.add_argument('--list-devices', action='store_true',
                         help='list audio devices and exit')
+    parser.add_argument('--auto', action='store_true',
+                        help='auto-select any device not given explicitly (default for --live)')
     parser.add_argument('--ref-wav', help='far-end reference WAV (synced Chrome audio)')
     parser.add_argument('--mic-wav', help='microphone WAV (voice + TV room echo)')
     parser.add_argument('--out-wav', help='destination WAV for the cleaned voice')
@@ -964,6 +1320,16 @@ def build_parser():
     parser.add_argument('--ref-device', default=None, help='reference input device')
     parser.add_argument('--mic-device', default=None, help='microphone input device')
     parser.add_argument('--out-device', default=None, help='cleaned voice output device')
+    parser.add_argument('--prefer-mic-device', default=None,
+                        help='soft preference for the microphone; ignored when disconnected')
+    parser.add_argument('--prefer-ref-device', default=None,
+                        help='soft preference for the reference input')
+    parser.add_argument('--prefer-out-device', default=None,
+                        help='soft preference for the virtual microphone output')
+    parser.add_argument('--prefer-usb', dest='prefer_usb', action='store_true', default=True,
+                        help='auto-mode prefers an external USB soundcard mic (default)')
+    parser.add_argument('--no-prefer-usb', dest='prefer_usb', action='store_false',
+                        help='auto-mode keeps the built-in mic even when a soundcard is plugged in')
     parser.add_argument('--ref-index', type=int, default=None,
                         help='ffmpeg avfoundation audio index for the reference')
     parser.add_argument('--mic-index', type=int, default=None,
@@ -990,7 +1356,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.list_devices:
-        return list_devices()
+        return list_devices(json_output=args.json,
+                            preferred={'mic_device': args.prefer_mic_device or args.mic_device,
+                                       'ref_device': args.prefer_ref_device or args.ref_device,
+                                       'out_device': args.prefer_out_device or args.out_device},
+                            allow_external=args.prefer_usb)
 
     if args.selftest:
         result = run_selftest(verbose=not args.json)
@@ -1033,7 +1403,11 @@ def main(argv=None):
             return 1
         run_live(ref_device=args.ref_device, mic_device=args.mic_device,
                  out_device=args.out_device, sample_rate=args.sample_rate,
-                 block_size=args.block, **canceller_kwargs(args))
+                 block_size=args.block, auto=True, json_output=args.json,
+                 preferred={'mic_device': args.prefer_mic_device,
+                            'ref_device': args.prefer_ref_device,
+                            'out_device': args.prefer_out_device},
+                 allow_external=args.prefer_usb, **canceller_kwargs(args))
         return 0
 
     parser.print_help()

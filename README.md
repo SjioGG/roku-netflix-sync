@@ -167,12 +167,48 @@ No headphones are needed, and the TV keeps playing from the Roku soundbar.
 
 ```sh
 pip install sounddevice          # or: pip install numpy sounddevice
-python3 aec_daemon.py --list-devices
+python3 aec_daemon.py --list-devices --json   # structured devices + a recommendation
+python3 aec_daemon.py --live --auto
+```
+
+`--live` auto-selects any device you do not pass explicitly ([BEE-232](https://linear.app/beeros/issue/BEE-232)): an
+external USB soundcard or interface wins over the built-in mic whenever one is
+plugged in, falling back to `MacBook Pro Microphone` when it is unplugged, and
+never treating a virtual or Continuity (`iPhone Microphone`) device as the
+physical mic. `--no-prefer-usb` keeps the built-in mic while a soundcard is
+connected; `--prefer-mic-device NAME` pins a saved choice, which is ignored when
+that device is gone. The only virtual device installed here is
+`ZoomAudioDevice`, so the daemon uses it for both the reference and the clean
+output and prints the `brew install --cask blackhole-2ch` hint for splitting the
+two buses.
+
+Pin devices manually when you want to:
+
+```sh
 python3 aec_daemon.py --live \
     --ref-device "BlackHole 2ch" \
     --mic-device "MacBook Pro Microphone" \
     --out-device "BlackHole 16ch"
 ```
+
+`--list-devices --json` prints the structure the desktop app consumes:
+
+```json
+{
+  "inputs":  [{"index": 0, "name": "MacBook Pro Microphone", "kind": "builtin", "channels": 1}],
+  "outputs": [{"index": 1, "name": "ZoomAudioDevice", "kind": "virtual", "channels": 2}],
+  "source": "system_profiler",
+  "recommended": {
+    "mic_device": "MacBook Pro Microphone",
+    "ref_device": "ZoomAudioDevice",
+    "out_device": "ZoomAudioDevice",
+    "notes": ["Only one virtual audio device (ZoomAudioDevice) is installed. ..."]
+  }
+}
+```
+
+`kind` is one of `usb`, `builtin`, `virtual` or `continuity`, decided by name and
+transport so it works through `sounddevice` or the `system_profiler` fallback.
 
 The daemon prints the tracked Roku/Chrome lag and the live ERLE every few
 blocks. `--backend ffmpeg` runs the same DSP over `ffmpeg -f avfoundation` pipes
@@ -214,8 +250,54 @@ recording pair, which is the quickest way to check a real living-room setup.
 
 `tests/test_aec.py` covers delay recovery at ±180 ms, at least 15 dB of ERLE
 through a multi-tap room response, near-end voice preservation during double
-talk, and the WAV CLI round trip. It passes on a bare `python3` in
-`ubuntu-latest` with no `pip install`.
+talk, the WAV CLI round trip, and device classification/auto-selection: an
+external `Focusrite Scarlett 2i2 USB` or `USB PnP Sound Device` wins over the
+built-in, Continuity and virtual devices, and unplugging it falls back to
+`MacBook Pro Microphone`. It passes on a bare `python3` in `ubuntu-latest` with
+no `pip install`.
+
+## Desktop control center ([BEE-232](https://linear.app/beeros/issue/BEE-232))
+
+`desktop/` is an Electron wrapper that runs both halves of the system from one
+dark-mode window: the ANC microphone daemon and the Roku LAN bridge.
+
+```sh
+./bin/launch-desktop.sh            # Electron if available, else the instant web UI
+./bin/launch-desktop.sh --install  # fetch Electron first (~200 MB, one time)
+./bin/launch-desktop.sh --web      # force http://127.0.0.1:8767 in Chrome --app
+```
+
+The launcher never blocks on a download. It uses Electron from
+`desktop/node_modules`, else unpacks an Electron zip already in
+`~/Library/Caches/electron`, else starts `desktop/server.cjs` and opens
+`http://127.0.0.1:8767` in a Chrome `--app` window. That last path serves the
+same `index.html` and the same controller logic over HTTP, so it opens in about a
+second.
+
+- **ANC Microphone Studio** shows the detected microphone with an
+  `Auto: External Soundcard` / `Auto: MacBook Mic` badge, a manual override
+  dropdown, the reference loopback and the virtual mic output, live `Measured TV
+  Delay`, `Echo Suppression (ERLE)` and `Speaking` / `Cancelling TV` meters, plus
+  Start ANC, Stop ANC and Run 4s DSP self-test. The warning banner repeats the
+  copyable `brew install --cask blackhole-2ch` command whenever only one virtual
+  device exists.
+- **Roku TV Bridge** edits the sync server URL, room token (with show/hide) and
+  Roku LAN URL, then starts `roku_client.py` and shows the live player state, app
+  and position.
+- Device discovery re-runs every 4 seconds while the window is open, so plugging
+  the USB soundcard in switches the active mic without a restart.
+
+Settings persist at `~/.config/roku-netflix-sync/desktop-config.json`:
+`serverUrl` (default `http://127.0.0.1:8766`), `token`, `rokuUrl` (default
+`http://192.168.1.100:8060`), `autoPickSoundcard`, `preferredMicDevice`,
+`preferredRefDevice` and `preferredOutDevice`.
+
+All state, config, discovery and child-process logic lives in
+`desktop/controller.cjs`, a plain Node module with no Electron import, so
+`tests/desktop-app.cjs` drives the whole app under bare `node` with no display
+server. `main.js` only owns the window and `ipcMain.handle` wiring
+(`contextIsolation: true`, `nodeIntegration: false`), and `preload.js` exposes the
+narrow `window.rokuDesktop` surface.
 
 ## Checks
 
@@ -227,6 +309,17 @@ for test in tests/*.cjs; do node "$test" || break; done
 Python tests exercise real HTTP handler paths against mocked device I/O. JS tests
 exercise extension event/race behavior and the Netflix API bridge in a simulated
 page. They do not establish actual Netflix/DRM or Denmark–Japan playback behavior.
+`tests/desktop-app.cjs` drives `desktop/controller.cjs` and the local UI server
+directly: config persistence, live device discovery through
+`aec_daemon.py --list-devices --json`, a real `--selftest --json` run, and the
+spawn/stop lifecycle of both Python children.
+
+The launcher can be checked without a display server:
+
+```sh
+./bin/launch-desktop.sh --web --no-open --port 8799   # serves http://127.0.0.1:8799
+ROKU_SYNC_DESKTOP_SMOKE=1 ./bin/launch-desktop.sh --electron --foreground
+```
 `tests/test_aec.py` additionally needs only the standard library: it forces the
 pure-Python FFT path even when `numpy` is installed, which is what the CI runner
 uses.
