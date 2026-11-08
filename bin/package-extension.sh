@@ -22,6 +22,10 @@ if worker:
 popup = manifest.get('action', {}).get('default_popup')
 if popup:
     files.add(popup)
+for icon in (manifest.get('icons') or {}).values():
+    files.add(icon)
+for icon in (manifest.get('action', {}).get('default_icon') or {}).values():
+    files.add(icon)
 for script in manifest.get('content_scripts', []):
     files.update(script.get('js', []))
     files.update(script.get('css', []))
