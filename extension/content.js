@@ -131,20 +131,36 @@
     const stamp=Number.isFinite(master.client_ms) ? master.client_ms : (Number.isFinite(master.received_at_ms) ? master.received_at_ms : Date.now());
     return base+Math.max(0,Date.now()-stamp);
   }
+  let lastPeerSeekAt=0;
+  function seekPeerVideo(v,target) {
+    const now=performance.now();
+    if(now-lastPeerSeekAt<1200) return;
+    lastPeerSeekAt=now;
+    suppress(v,'seek');
+    const media=detectMedia();
+    if((!media || media.app==='netflix') && document.dispatchEvent && typeof CustomEvent==='function') {
+      try {
+        const id='peer-'+String(++bridgeRequest)+'-'+Date.now();
+        document.dispatchEvent(new CustomEvent('roku-sync-seek',{detail:{id,position:Math.round(target)}}));
+      } catch(e) {}
+    }
+    try {v.currentTime=target/1000;} catch(e) {}
+  }
   function followMaster(master,v) {
     if(!master || master.client_id===clientId) return;
+    const media=detectMedia();
+    if(media?.titleId && master.title_id && String(master.title_id)!==String(media.titleId)) return;
     const target=masterTarget(master);
     if(target===null) return;
     const current=Math.round(v.currentTime*1000);
     if(master.paused===true) {
       if(!v.paused) pauseQuietly(v);
-      if(Math.abs(current-target)>600) {suppress(v,'seek');v.currentTime=target/1000;}
+      if(Math.abs(current-target)>600) seekPeerVideo(v,target);
       return;
     }
     if(master.paused===false) {
-      if(Math.abs(current-target)>500) {suppress(v,'seek');v.currentTime=target/1000;}
+      if(Math.abs(current-target)>600) seekPeerVideo(v,target);
       if(v.paused) playQuietly(v).catch(()=>{});
-      if(Math.abs(Math.round(v.currentTime*1000)-target)>600) {suppress(v,'seek');v.currentTime=target/1000;}
     }
   }
 
@@ -175,16 +191,17 @@
     if(!seek)return seekInFlight || Promise.resolve();
     const previous=seekInFlight || Promise.resolve();
     const task=previous.then(async()=>{
+      const inPeerMode=peerMode();
       const wasPlaying=video && !video.paused;
-      if(video && wasPlaying) pauseQuietly(video);
-      say('Seeking TV to ' + Math.round(seek.position/1000) + 's…');
+      if(video && wasPlaying && !inPeerMode) pauseQuietly(video);
+      say(inPeerMode ? 'Syncing seek to ' + Math.round(seek.position/1000) + 's…' : 'Seeking TV to ' + Math.round(seek.position/1000) + 's…');
       const media=detectMedia();
       const result=await send({type:'event',action:'seek',position:seek.position,client_id:clientId,...(media?{app:media.app}:{})});
       if(!invalidated) {
         if(result.error) {
           say('Sync failed · '+result.error);
           if(video && wasPlaying && video.paused) playQuietly(video).catch(()=>{});
-        } else if(result.data?.peer_mode) {
+        } else if(result.data?.peer_mode || inPeerMode) {
           say('Master sought to '+(seek.position/1000).toFixed(1)+'s');
         } else if(wasPlaying && video && video.paused) {
           await startTogether(video, result.data);
@@ -429,8 +446,12 @@
           seq=state.seq;
           const event=state.event;
           if(!master && event?.source==='master' && video) {
+            if(event.action==='title' && event.position && state.title_id && media?.app==='netflix' && media.titleId!==state.title_id) {
+              location.href='https://www.netflix.com/watch/'+state.title_id;return;
+            }
             // React to the master's publish immediately rather than on the next poll.
-            followMaster({...state.master_state, paused:event.action==='pause'},video);
+            const nextPaused = event.action==='pause' ? true : event.action==='play' ? false : state.master_state?.paused;
+            followMaster({...state.master_state, ...(typeof event.position==='number'?{position_ms:event.position,client_ms:Date.now()}:{}), paused:nextPaused},video);
           }
         }
         if(!master && video && state.master_state) followMaster(state.master_state,video);
