@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Roku Netflix Sync Experiment",
-  "version": "0.3.0",
-  "description": "Experimental playback sync with a private Roku relay.",
+  "name": "roku-sync",
+  "version": "0.3.2",
+  "description": "Synchronizes streaming playback across browsers and Roku devices via a private sync relay.",
   "permissions": [
     "storage"
   ],
