@@ -321,11 +321,11 @@ desktop app.
 **2. `desktop/`**
 
 ```
-desktop/index.html + renderer.js + styles.css     two cards, dark mode
+desktop/index.html + renderer.js + styles.css     three cards, dark mode
         │  window.rokuDesktop (IPC in Electron, fetch in a browser)
 desktop/main.js        BrowserWindow, ipcMain.handle, 4 s device poll
 desktop/preload.js     contextBridge surface (contextIsolation, no node in renderer)
-desktop/controller.cjs config, discovery, ANC + bridge children, self-test
+desktop/controller.cjs config, discovery, ANC + bridge children, self-test, RTT
 desktop/server.cjs     same controller behind http://127.0.0.1:8767
 bin/launch-desktop.sh  Electron → cached Electron → Chrome --app
 ```
@@ -341,6 +341,30 @@ The ANC card mirrors the daemon's own recommendation (`--list-devices --json`
 with the saved `--prefer-*-device` flags), so the UI can never claim a device
 that `--live` would not actually open. Children are stopped with `SIGTERM` and a
 3 s `SIGKILL` backstop on quit.
+
+**Roku discovery and RTT** ([BEE-233](https://linear.app/beeros/issue/BEE-233))
+
+`roku_client.py --discover --json` walks three candidate sources in one pass:
+explicit `--seed-url` values plus `ROKU_URL`, SSDP `M-SEARCH` for `roku:ecp`
+(400 ms window), and the ARP table (private ranges, skipping `(incomplete)`
+entries). Every candidate is probed on its own thread for `/query/device-info`
+and `/query/active-app`, so a scan costs one short round trip rather than one per
+address. `parse_device_info()` maps the XML to the AirPlay-style fields the
+picker renders, degrading each one to a default instead of raising, because
+partial device-info documents are common. The configured `ROKU_URL` sorts first
+and the rest follow by latency.
+
+The **Server RTT** panel calls `pingServer()`: five sequential `/clock` requests,
+`network_rtt = total_rtt - (server_ms - received_ms)` to strip server think time,
+`offset = (received_ms + server_ms) / 2 + skew - (wall_start + total_rtt / 2)`, and
+the lowest-network-RTT sample wins. The lead is
+`clamp(2000 + best_rtt × 4, 3000, 15000)`, exactly the formula in
+`extension/content.js`, so the panel predicts what a real start will do. The Roku
+fires `/keypress/Play` at `lead - (player_trim + roku_one_way)`, where
+`roku_one_way = (roku_poll_ms + roku_toggle_ms) / 2`; Chrome fires `video.play()`
+at `lead` on its own clock. The `+240 ms` Japan button adds a deterministic
+per-sample jitter pattern so the sample strip moves the way a real trans-Pacific
+link does.
 
 **Known limits**: `sounddevice` is still required for live capture, so without it
 the Start ANC button reports the `pip install sounddevice` hint rather than
