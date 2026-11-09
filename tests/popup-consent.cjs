@@ -1,18 +1,38 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-function setup(initial={}) {
+function setup(initial={}, inTab=true, session={}) {
   const ids=['server','token','status','rokuLeadMs','enabled','syncMode','baton','consent','save','forget'];
   const elements=Object.fromEntries(ids.map(id=>[id,{value:'',checked:false,textContent:''}]));
-  const storage={...initial},writes=[],permissions=[];
+  const storage={...initial},writes=[],permissions=[],drafts={...session},opened=[];
   let granted=true;
   const ctx={document:{querySelector:selector=>elements[selector.slice(1)]},URL,chrome:{
-    storage:{local:{get:async()=>({...storage}),set:async value=>{writes.push(value);Object.assign(storage,value)}}},
+    storage:{local:{get:async()=>({...storage}),set:async value=>{writes.push(value);Object.assign(storage,value)}},session:{get:async()=>({...drafts}),set:async value=>Object.assign(drafts,value),remove:async key=>delete drafts[key]}},
     permissions:{request:async request=>{permissions.push(request);return granted}},
-    tabs:{query:async()=>[],sendMessage:async()=>({ok:true})}
+    runtime:{getURL:path=>`chrome-extension://fixture/${path}`},
+    tabs:{getCurrent:async()=>inTab?{id:1}:undefined,create:async value=>opened.push(value),query:async()=>[],sendMessage:async()=>({ok:true})}
   }};
   vm.runInNewContext(fs.readFileSync('extension/popup.js','utf8'),ctx);
-  return {elements,storage,writes,permissions,deny:()=>{granted=false}};
+  return {elements,storage,writes,permissions,drafts,opened,deny:()=>{granted=false}};
 }
 (async()=>{
+  const popup=setup({},false);await new Promise(setImmediate);
+  popup.elements.server.value='https://relay.example';popup.elements.token.value='fixture';
+  popup.elements.rokuLeadMs.value='0';popup.elements.enabled.checked=true;popup.elements.consent.checked=true;
+  await popup.elements.save.onclick();
+  assert.equal(popup.permissions.length,0,'a popup must not open the native permission dialog that destroys its Save continuation');
+  assert.equal(popup.opened.length,1,'first-time permission setup continues in a full tab');
+  assert.equal(popup.writes.length,0,'opening setup must not activate sync');
+  assert.equal(popup.drafts.relaySetupDraft.token,'fixture','draft survives popup closure without entering page URLs');
+
+  const tab=setup({},true,popup.drafts);await new Promise(setImmediate);
+  assert.equal(tab.elements.token.value,'fixture','the persistent tab restores the popup draft');
+  assert.equal(tab.elements.enabled.checked,true);
+  assert.equal(tab.storage.enabled,undefined,'reading a draft never enables sync');
+  assert.equal(tab.drafts.relaySetupDraft,undefined,'consume the temporary draft once');
+  assert.equal(tab.permissions.length,0,'opening setup cannot request host permission without a click');
+  await tab.elements.save.onclick();
+  assert.equal(tab.storage.enabled,true,'the persistent tab commits after permission approval');
+  assert.equal(tab.opened[0],undefined,'saving the persistent tab must not open more tabs');
+
   const h=setup({server:'https://old.example',token:'saved',enabled:true});
   await new Promise(setImmediate);
   assert.equal(h.elements.enabled.checked,false,'an existing install must explicitly consent');

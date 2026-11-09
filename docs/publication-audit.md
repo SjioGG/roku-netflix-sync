@@ -68,8 +68,9 @@ need a suitable HTTPS proxy and operator controls.
 No live streaming-account/Roku or native permission-dialog end-to-end validation
 was added by this audit. Netflix contractual authorization remains unverified.
 Older code versions remain older code even if their identifying examples are
-sanitized. The previously uploaded Web Store draft predates these additional
-repository hardening changes and must be refreshed before submission.
+sanitized. The initially uploaded Web Store draft predates these additional
+repository hardening changes. See compliance-verification.md for the subsequent
+0.3.4 interactive checks and resubmission record.
 
 ## Publication gate
 
@@ -83,3 +84,11 @@ local agent checkpoint refs, private `.env` files, or old release archives to th
 public repository.
 
 Reference: [GitHub's sensitive-data removal guidance](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository).
+
+## Publication completed
+
+The owner approved the archive/replacement migration. Sanitized main and eight
+sanitized version tags were published to a fresh independent public repository
+at the original URL. The original repository, object history, and eight releases
+remain private in a separate archive. Local private settings were preserved.
+Actions were disabled during import to avoid releasing historical versions.

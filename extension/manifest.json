@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "roku-sync",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Experimental playback sync between browsers or a browser and Roku. Requires a configured relay; Roku mode needs LAN access.",
   "permissions": [
     "storage"

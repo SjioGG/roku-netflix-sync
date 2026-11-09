@@ -1,6 +1,6 @@
 # Version 0.3.3 verification
 
-November 9, 2026. Changes are uncommitted on top of
+Initial November 9, 2026 checkpoint: changes were uncommitted on top of
 `091de5023a1e042661c8e141f1c162a064231990`.
 
 ## Implemented
@@ -72,3 +72,33 @@ The subsequent repository audit passed all 154 Python tests and all JavaScript
 checks, including 40 desktop checks. Local settings are ignored and owner-only;
 public fixtures use fictional device identifiers. See `publication-audit.md` for
 scope, fixes, historical-data limits, and the pending publication migration.
+
+## Resubmission verification, version 0.3.4
+
+Terra independently reviewed consent, optional permissions, metadata, and the
+reviewer procedure. No new consent/permission bypass was identified. Interactive
+Chrome testing then reproduced a popup lifecycle bug: the native host-permission
+dialog closed the popup before Save could finish. Setup now carries its draft in
+extension-only session storage to a persistent settings tab and commits only
+after the user Saves there and grants access. Regression coverage fails on the
+old flow and passes on the replacement.
+
+Chrome's real host-permission approval and subsequent Saved state were observed.
+Two YouTube tabs demonstrated play/pause, seek following, and master-baton
+transfer. Both paused at the same reported playback position. Disabling sync and
+Forget were checked interactively.
+
+After the owner explicitly resumed on their private network, the configured
+Roku Smart Soundbar was identified against private local reference values. The
+public Blender test film opened on the TV, confirmed through the camera, and
+Chrome play/pause changes matched the soundbar's reported play/pause states.
+The initial launch status timed out before playback started; launch timing and
+frame accuracy remain unproven. No Netflix account playback was tested.
+
+The sanitized source repository is now public, while the original history and
+releases remain in a separate private archive. The public policy is canonical
+in PRIVACY.md. The Web Store must receive the new 0.3.4 package before submission.
+The final 0.3.4 JavaScript checks and generated-policy check passed. A fresh
+real setup-tab capture was cropped to the extension form and padded to 1280 x 800 for the listing, preserving its
+visible contents. After Disable/Forget, client telemetry remained unchanged;
+the test relay was then stopped and the TV left paused.

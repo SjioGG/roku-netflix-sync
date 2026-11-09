@@ -132,7 +132,7 @@ publish a real room token, personal playback history, or private device address.
 
 1. Clone `https://github.com/SjioGG/roku-netflix-sync` (requires public visibility or separately provided access), enter its directory, and run `SYNC_HOST=127.0.0.1 SYNC_TOKEN='review-fixture-only' ROKU_BRIDGE_ONLY=1 python3 sync_server.py` with Python 3. The example token is only for an isolated local test; do not expose this relay publicly.
 2. Install the submitted extension. Open its popup, use relay URL `http://127.0.0.1:8766` and token `review-fixture-only`, and choose **Browser-to-Browser (Master/Slave, No Roku)**.
-3. Read the disclosure, explicitly accept data sharing, enable sync, and save. Approve Chrome's request for access to the chosen relay host if shown.
+3. Read the disclosure, explicitly accept data sharing, enable sync, and Save. Setup opens in a normal tab with your draft settings. Save in that tab and approve Chrome's request for access to the chosen relay host if shown. The tab must show Saved before testing.
 4. Open the same playable YouTube video in two tabs and interact with each player once to allow playback. Use content the reviewer is authorized to access, with matching playback versions; do not use a login, paid title, or geo-restricted video as the only review path. Reload the tabs after setup if needed.
 5. Check the badge to identify the master and follower. Play, pause, and seek using the master's normal video controls. The follower should reflect the changes. Click the badge or popup baton button to transfer control.
 6. Disable sync in the popup. Confirm subsequent playback stays local and relay polling stops. Re-enable to reconnect.
@@ -152,7 +152,7 @@ screenshots, developer dashboards, desktop ANC controls, or unrelated video
 artwork as demonstrations of extension functionality.
 
 - Capture the real popup showing relay setup, the data-sharing notice, sync mode, and enable control. Keep the token masked and use a local or public example relay rather than personal infrastructure details.
-- A clean, unconfigured popup capture for version 0.3.3 is included at [screenshots/popup-0.3.3.png](screenshots/popup-0.3.3.png). It shows setup only, not evidence of working Roku or peer synchronization. Do not reuse the old blank-block `dist/cws-screenshot-1280x800.png`.
+- A clean, unconfigured setup-tab capture for version 0.3.4 is included at [screenshots/popup-0.3.4.png](screenshots/popup-0.3.4.png). It shows setup only, not evidence of working Roku or peer synchronization. Do not reuse the old blank-block `dist/cws-screenshot-1280x800.png`.
 - Capture the real in-page badge during a successful browser-to-browser session, including the streaming player controls needed to understand the feature. Prefer content you own or have permission to reproduce, and exclude account names and personal recommendations.
 - If showing Roku synchronization, use an authentic demonstration of the feature and describe the hardware/setup requirement. Do not label a browser-only screenshot as proof of Roku synchronization.
 - Replace every rejected screenshot and inspect the title, short/detailed description, category, icons, and promotional media for the same mismatch.
