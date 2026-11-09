@@ -14,6 +14,7 @@ function run(fail) {
   }};
   class CustomEvent {constructor(type,options){this.type=type;this.detail=options.detail}}
   const ctx={document,CustomEvent,chrome:{runtime:{sendMessage(m,cb){messages.push(m);if(m.type==='read')cb({data:{seq:0,roku:'pause',last_update:Date.now()/1000,launch_status:'sent',title_id:'123'}});else if(m.type==='sample')cb({data:{sample_id:'fixture',after:'10000 ms'}});else if(m.type==='clock')cb({data:{server_ms:Date.now(),received_ms:Date.now()}});else if(m.type==='schedule')cb({data:{id:'scheduled',start_ms:Date.now()+4000}});else cb({data:{ok:true}})}}},location:{pathname:'/watch/123'},performance:{now:()=>10000},setTimeout:(f,delay)=>timers.push({f,delay}),Date,Promise,console};
+  ctx.chrome.storage=require('./consented-storage.cjs')();
   vm.runInNewContext(fs.readFileSync('extension/content.js','utf8'),ctx);
   return {v,messages,timers};
 }

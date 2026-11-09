@@ -5,6 +5,7 @@
 
   Install:
     cp deploy/com.sjiogg.roku-bridge-client.plist ~/Library/LaunchAgents/
+    # replace /ABSOLUTE/PATH/TO/roku-netflix-sync with your clone path,
     # edit the SYNC_SERVER_URL / SYNC_TOKEN values below, then:
     launchctl unload ~/Library/LaunchAgents/com.sjiogg.roku-bridge-client.plist 2>/dev/null
     launchctl load  ~/Library/LaunchAgents/com.sjiogg.roku-bridge-client.plist

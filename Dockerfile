@@ -14,7 +14,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Stdlib-only relay: no dependency install step and no build tooling in the image.
-COPY sync_server.py ./
+COPY sync_server.py local_env.py ./
 
 # Run unprivileged; port 8766 is above 1024 so no capabilities are needed.
 RUN useradd --create-home --shell /usr/sbin/nologin relay

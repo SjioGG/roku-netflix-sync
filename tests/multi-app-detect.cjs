@@ -18,7 +18,7 @@ function run({hostname,pathname,search='',hash='',currentTime=21}){
   const ctx={
     document,
     chrome:{
-      storage:{local:{get:(keys,cb)=>{const value={enabled:true,syncMode:'roku'};if(cb)cb(value);return Promise.resolve(value)}}},
+      storage:{local:{get:(keys,cb)=>{const value={enabled:true,syncMode:'roku',server:'http://127.0.0.1:8766',privacyConsent:{version:1,server:'http://127.0.0.1:8766'}};if(cb)cb(value);return Promise.resolve(value)}}},
       runtime:{sendMessage(m,cb){
         messages.push(m);
         if(m.type==='event' && m.action==='title')relayTitle=m.title_id;

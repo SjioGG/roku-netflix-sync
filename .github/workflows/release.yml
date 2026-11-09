@@ -28,11 +28,12 @@ jobs:
       - name: Package server release bundle
         run: |
           mkdir -p release-bundle/desktop release-bundle/bin
-          cp sync_server.py roku_client.py roku_dashboard.py aec_daemon.py dashboard.html README.md ARCHITECTURE.md release-bundle/
+          cp sync_server.py roku_client.py roku_dashboard.py local_env.py aec_daemon.py dashboard.html README.md ARCHITECTURE.md PRIVACY.md release-bundle/
+          cp .env.example release-bundle/
           cp dist/roku-netflix-sync-extension.zip release-bundle/
-          cp desktop/package.json desktop/main.js desktop/preload.js desktop/controller.cjs \
+          cp desktop/package.json desktop/main.js desktop/preload.js desktop/controller.cjs desktop/local-env.cjs \
              desktop/server.cjs desktop/index.html desktop/renderer.js desktop/styles.css release-bundle/desktop/
-          cp bin/package-extension.sh bin/launch-desktop.sh release-bundle/bin/
+          cp bin/package-extension.sh bin/launch-desktop.sh bin/render-privacy.py release-bundle/bin/
           chmod +x release-bundle/bin/*.sh
           tar czf build.tar.gz -C release-bundle .
           tar tzf build.tar.gz | grep -qx './aec_daemon.py' || { echo 'aec_daemon.py missing from build.tar.gz' >&2; exit 1; }

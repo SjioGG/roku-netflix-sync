@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
   "name": "roku-sync",
-  "version": "0.3.2",
-  "description": "Synchronizes streaming playback across browsers and Roku devices via a private sync relay.",
+  "version": "0.3.3",
+  "description": "Experimental playback sync between browsers or a browser and Roku. Requires a configured relay; Roku mode needs LAN access.",
   "permissions": [
     "storage"
   ],
-  "host_permissions": [
+  "optional_host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
-    "https://*.gaku.dev/*"
+    "https://*/*"
   ],
   "icons": {
     "16": "icon-16.png",

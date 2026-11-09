@@ -23,6 +23,7 @@ const {
 } = require('../desktop/controller.cjs')
 const { createServer } = require('../desktop/server.cjs')
 
+// Device and network metadata below are synthetic public fixtures.
 const ROOT = path.resolve(__dirname, '..')
 const results = []
 
@@ -853,7 +854,7 @@ async function main() {
       assert.ok(renderer.includes('pingServer'), 'renderer has no ping call')
       assert.ok(renderer.includes('navigator.clipboard.writeText') || renderer.includes('api.copy'),
         'renderer has no clipboard copy')
-      const scanned = await fetch(`${base}/api/roku/scan`, { method: 'POST' })
+      const scanned = await fetch(`${base}/api/roku/scan`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
         .then((response) => response.json())
       assert.ok(Array.isArray(scanned.rokuDevices), 'scan route returned no device list')
       const pinged = await fetch(`${base}/api/ping`, {
@@ -938,11 +939,12 @@ async function main() {
     }
 
     const state = {
-      config: { serverUrl: 'https://sync.example.test', token: 'room-token',
+      config: { serverUrl: 'https://sync.example.test',
         rokuUrl: 'http://192.168.1.100:8060', autoPickSoundcard: true },
       configPath: '/tmp/desktop-config.json',
       configLoadedFromDisk: true,
       tokenFromConfigFile: true,
+      tokenConfigured: true,
       devices: null,
       deviceError: null,
       deviceSource: null,
@@ -988,10 +990,12 @@ async function main() {
 
     let renderState = null
     const pingCalls = []
+    const configPatches = [], copiedTokens = []
     const api = {
       isElectron: true,
       getState: () => Promise.resolve(state),
-      saveConfig: () => Promise.resolve(state),
+      saveConfig: (patch) => { configPatches.push(patch); return Promise.resolve(state) },
+      revealToken: () => Promise.resolve({ token: 'room-token' }),
       refreshDevices: () => Promise.resolve(state),
       startAnc: () => Promise.resolve(state),
       stopAnc: () => Promise.resolve(state),
@@ -1001,7 +1005,7 @@ async function main() {
       scanRokuDevices: () => Promise.resolve(state),
       pingServer: (options) => { pingCalls.push(options); return Promise.resolve(state) },
       recentLogs: () => Promise.resolve([]),
-      copy: () => Promise.resolve(true),
+      copy: (text) => { copiedTokens.push(text); return Promise.resolve(true) },
       openExternal: () => Promise.resolve(true),
       onState: (callback) => { renderState = callback; return () => {} },
       onLog: () => () => {},
@@ -1089,6 +1093,15 @@ async function main() {
     await sampleButton('copy-token')()
     assert.equal(elements.get('copy-token').textContent, 'Copied!',
       'the copy button must flash a confirmation')
+    assert.equal(copiedTokens.pop(), 'room-token', 'Copy explicitly retrieves the saved token')
+    assert.equal(elements.get('room-token').value, '', 'polling must not populate the saved token')
+    await sampleButton('start-bridge')()
+    assert.equal(Object.prototype.hasOwnProperty.call(configPatches.pop(), 'token'), false,
+      'starting with a masked saved token must not clear it')
+    elements.get('room-token').value = ''
+    elements.get('room-token').listeners.input[0]()
+    await sampleButton('start-bridge')()
+    assert.equal(configPatches.pop().token, '', 'explicitly clearing the field clears the saved token')
   })
 
   console.log('desktop local UI server')
@@ -1112,8 +1125,9 @@ async function main() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ patch: { token: 'via-http' } }),
       }).then((response) => response.json())
-      assert.equal(saved.config.token, 'via-http')
-      const devices = await fetch(`${base}/api/devices/refresh`, { method: 'POST' })
+      assert.equal(saved.config.token, undefined)
+      assert.equal(saved.tokenConfigured, true)
+      const devices = await fetch(`${base}/api/devices/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
         .then((response) => response.json())
       assert.ok(devices.devices, 'no devices in the refresh response')
       assert.ok(devices.devices.recommended, 'no recommendation in the response')
@@ -1135,7 +1149,7 @@ async function main() {
     try {
       const address = await app.listen(0, '127.0.0.1')
       const result = await fetch(`http://127.0.0.1:${address.port}/api/anc/selftest`,
-        { method: 'POST' }).then((response) => response.json())
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } }).then((response) => response.json())
       assert.equal(result.selfTest.result.ok, true)
       assert.ok(result.selfTest.result.erle_db > 20)
     } finally {

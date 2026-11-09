@@ -12,10 +12,12 @@
 const fs = require('node:fs')
 const http = require('node:http')
 const path = require('node:path')
+if (require.main === module) require('./local-env.cjs').loadLocalEnv()
 const { DesktopController } = require('./controller.cjs')
 
 const DEFAULT_PORT = 8767
 const DEFAULT_HOST = '127.0.0.1'
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const STATIC_FILES = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
@@ -59,6 +61,7 @@ function sendJson(response, status, payload) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
   })
   response.end(body)
 }
@@ -82,6 +85,7 @@ function createServer(options = {}) {
   const routes = {
     'GET /api/state': () => controller.snapshot(),
     'GET /api/logs': () => recentLog.slice(-60),
+    'POST /api/token/reveal': () => ({ token: controller.getConfig().token }),
     'POST /api/config': (body) => {
       controller.saveConfig(body && body.patch ? body.patch : body)
       controller.refreshDevices().catch(() => {})
@@ -118,9 +122,26 @@ function createServer(options = {}) {
   }
 
   const server = http.createServer(async (request, response) => {
-    const url = new URL(request.url || '/', `http://${request.headers.host || DEFAULT_HOST}`)
-    const key = `${request.method} ${url.pathname}`
     try {
+      const origin = new URL(`http://${request.headers.host || ''}`)
+      if (!LOOPBACK_HOSTS.has(origin.hostname) || origin.port !== String(server.address().port) || origin.username || origin.password) {
+        sendJson(response, 403, { error: 'local host required' })
+        return
+      }
+      const url = new URL(request.url || '/', origin)
+      const key = `${request.method} ${url.pathname}`
+      if (url.pathname.startsWith('/api/')) {
+        const site = request.headers['sec-fetch-site']
+        if ((site && site !== 'same-origin' && site !== 'none') ||
+            (request.headers.origin && request.headers.origin !== origin.origin)) {
+          sendJson(response, 403, { error: 'same-origin requests required' })
+          return
+        }
+        if (request.method === 'POST' && (request.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json') {
+          sendJson(response, 415, { error: 'application/json required' })
+          return
+        }
+      }
       if (routes[key]) {
         const body = request.method === 'POST' ? await readBody(request) : {}
         sendJson(response, 200, await routes[key](body))
@@ -133,6 +154,9 @@ function createServer(options = {}) {
           'Content-Type': asset.type,
           'Content-Length': payload.length,
           'Cache-Control': 'no-store',
+          'X-Frame-Options': 'DENY',
+          'Content-Security-Policy': "frame-ancestors 'none'",
+          'X-Content-Type-Options': 'nosniff',
         })
         response.end(request.method === 'HEAD' ? undefined : payload)
         return
@@ -147,6 +171,10 @@ function createServer(options = {}) {
     server,
     controller,
     listen: (port = DEFAULT_PORT, host = DEFAULT_HOST) => new Promise((resolve, reject) => {
+      if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
+        reject(new Error('The desktop UI must bind to loopback. Use the authenticated relay for remote access.'))
+        return
+      }
       server.once('error', reject)
       server.listen(port, host, () => {
         server.removeListener('error', reject)

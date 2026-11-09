@@ -20,10 +20,10 @@ class SampleTest(unittest.TestCase):
             calls.append(req)
             return io.BytesIO(next(states) if isinstance(req,str) else b'')
         with patch.object(dashboard.urllib.request,'urlopen',side_effect=fake),patch.object(dashboard.time,'sleep'):
-            handler=dashboard.Handler.__new__(dashboard.Handler);out=[];handler.path='/sample-paused';handler.reply=lambda code,data:out.append((code,data));handler.do_POST()
+            handler=dashboard.Handler.__new__(dashboard.Handler);handler.headers={'Host':'127.0.0.1:8765','Content-Type':'application/json'};out=[];handler.path='/sample-paused';handler.reply=lambda code,data:out.append((code,data));handler.do_POST()
         self.assertEqual(out[0][0],200);self.assertEqual(out[0][1]['after'],'1300 ms');self.assertEqual(sum(not isinstance(x,str) for x in calls),2)
     def test_never_toggle_if_not_paused(self):
         with patch.object(dashboard.urllib.request,'urlopen',return_value=io.BytesIO(player('play',1000))) as mocked:
-            handler=dashboard.Handler.__new__(dashboard.Handler);out=[];handler.path='/sample-paused';handler.reply=lambda code,data:out.append((code,data));handler.do_POST()
+            handler=dashboard.Handler.__new__(dashboard.Handler);handler.headers={'Host':'127.0.0.1:8765','Content-Type':'application/json'};out=[];handler.path='/sample-paused';handler.reply=lambda code,data:out.append((code,data));handler.do_POST()
         self.assertEqual(out[0][0],409);self.assertEqual(mocked.call_count,1)
 if __name__=='__main__':unittest.main()

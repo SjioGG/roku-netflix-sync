@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+recordings
+*.wav
+*.log
+dist
+desktop/node_modules
+desktop/.electron-cache

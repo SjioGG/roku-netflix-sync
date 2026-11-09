@@ -7,7 +7,7 @@ function run({masterClientId, clientId, masterState, syncMode='peer', videoPause
     async play(){this.paused=false;listeners.play?.({type:'play'})},
     pause(){this.paused=true;listeners.pause?.({type:'pause'})}};
   const badge={style:{},textContent:'',title:'',setAttribute(){},addEventListener:(n,f)=>{if(n==='click')badge.click=f;}};
-  let stored={enabled:true,syncMode};
+  let stored={enabled:true,syncMode,server:'http://127.0.0.1:8766',privacyConsent:{version:1,server:'http://127.0.0.1:8766'}};
   const ctx={
     document:{createElement:()=>badge,documentElement:{appendChild(){}},querySelector:()=>video,querySelectorAll:()=>[]},
     chrome:{

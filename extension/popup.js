@@ -1,6 +1,47 @@
-const server=document.querySelector('#server'), token=document.querySelector('#token'), status=document.querySelector('#status'), rokuLeadMs=document.querySelector('#rokuLeadMs'), enabled=document.querySelector('#enabled'), syncMode=document.querySelector('#syncMode'), baton=document.querySelector('#baton');
-chrome.storage.local.get(['server','token','rokuLeadMs','enabled','syncMode']).then(x=>{server.value=x.server||'http://127.0.0.1:8766';token.value=x.token||'';rokuLeadMs.value=String(x.rokuLeadMs ?? 0);enabled.checked=x.enabled!==false;syncMode.value=x.syncMode==='peer'?'peer':'roku'});
-enabled.onchange=async()=>{await chrome.storage.local.set({enabled:enabled.checked});status.textContent=enabled.checked?'Sync enabled.':'Sync disabled. Playback will continue normally.'};
+const server=document.querySelector('#server'), token=document.querySelector('#token'), status=document.querySelector('#status'), rokuLeadMs=document.querySelector('#rokuLeadMs'), enabled=document.querySelector('#enabled'), syncMode=document.querySelector('#syncMode'), baton=document.querySelector('#baton'), consent=document.querySelector('#consent');
+let saved={};
+function hasConsent(value) {
+  return value.privacyConsent?.version===1 && !!value.server && value.privacyConsent.server===value.server;
+}
+function relayUrl(value) {
+  const url=new URL(value);
+  if(url.protocol!=='https:' && !(url.protocol==='http:' && ['localhost','127.0.0.1'].includes(url.hostname))) throw Error('Use HTTPS or localhost.');
+  if(url.username || url.password || url.pathname!=='/' || url.search || url.hash) throw Error('Enter only the relay origin, without credentials, a path or a query.');
+  return url;
+}
+chrome.storage.local.get(['server','token','rokuLeadMs','enabled','syncMode','privacyConsent']).then(value=>{
+  saved=value;
+  server.value=value.server||'http://127.0.0.1:8766';
+  token.value=value.token||'';
+  rokuLeadMs.value=String(value.rokuLeadMs ?? 0);
+  consent.checked=hasConsent(value);
+  enabled.checked=value.enabled===true && hasConsent(value);
+  syncMode.value=value.syncMode==='peer'?'peer':'roku';
+  if(!hasConsent(value)) status.textContent='Sync is off. Review data sharing, choose your settings, and Save to start.';
+});
+enabled.onchange=async()=>{
+  if(!enabled.checked) {
+    await chrome.storage.local.set({enabled:false});saved.enabled=false;
+    status.textContent='Sync disabled. Playback will continue normally.';
+  } else if(hasConsent(saved) && consent.checked && server.value.trim()===saved.server) {
+    await chrome.storage.local.set({enabled:true});saved.enabled=true;
+    status.textContent='Sync enabled.';
+  } else status.textContent='Review data sharing and Save to enable sync.';
+};
+consent.onchange=async()=>{
+  if(!consent.checked) {
+    enabled.checked=false;
+    await chrome.storage.local.set({enabled:false,privacyConsent:null});
+    saved.enabled=false;saved.privacyConsent=null;
+    status.textContent='Consent withdrawn. No new relay requests will be sent. Existing room data is held by the relay.';
+  }
+};
+server.oninput=async()=>{
+  // Permission and data-sharing consent are specific to the chosen relay.
+  try {consent.checked=hasConsent(saved) && relayUrl(server.value).origin===saved.server;}
+  catch {consent.checked=false;}
+  if(!consent.checked && hasConsent(saved)) await consent.onchange();
+};
 syncMode.onchange=async()=>{
   const mode=syncMode.value==='peer'?'peer':'roku';
   await chrome.storage.local.set({syncMode:mode});
@@ -12,10 +53,29 @@ baton.onclick=async()=>{
   const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
   if(!tab?.id) {status.textContent='Open a streaming tab first.';return;}
   try {
-    await chrome.tabs.sendMessage(tab.id,{type:'baton-toggle'});
-    status.textContent='Baton updated. Check the page badge.';
-  } catch(e) {
+    const result=await chrome.tabs.sendMessage(tab.id,{type:'baton-toggle'});
+    status.textContent=result?.disabled?'Enable sync after reviewing data sharing and saving settings.':'Baton updated. Check the page badge.';
+  } catch {
     status.textContent='Baton needs a supported streaming tab (reload it first).';
   }
 };
-document.querySelector('#save').onclick=async()=>{try{let u=new URL(server.value);if(u.protocol!=='https:' && !(u.protocol==='http:'&&['localhost','127.0.0.1'].includes(u.hostname)))throw Error('Use HTTPS or localhost.');if(!token.value)throw Error('Enter the room token.');const lead=Number(rokuLeadMs.value);if(rokuLeadMs.value.trim()==='' || !Number.isInteger(lead) || lead<-1000 || lead>1000)throw Error('Enter a Roku start offset from -1000 to 1000 ms.');await chrome.storage.local.set({server:u.origin,token:token.value,rokuLeadMs:lead,enabled:enabled.checked,syncMode:syncMode.value==='peer'?'peer':'roku'});status.textContent='Saved. Reload your streaming watch tab.'}catch(e){status.textContent=e.message}};
+document.querySelector('#save').onclick=async()=>{
+  try {
+    const url=relayUrl(server.value);
+    if(!token.value.trim()) throw Error('Enter the room token.');
+    if(!consent.checked) throw Error('Review and accept data sharing before connecting.');
+    const lead=Number(rokuLeadMs.value);
+    if(rokuLeadMs.value.trim()==='' || !Number.isInteger(lead) || lead<-1000 || lead>1000) throw Error('Enter a Roku start offset from -1000 to 1000 ms.');
+    // Call directly from the click gesture, before awaiting any other operation.
+    const granted=await chrome.permissions.request({origins:[url.protocol+'//'+url.hostname+'/*']});
+    if(!granted) throw Error('Relay access was not granted. Settings were not changed.');
+    saved={server:url.origin,token:token.value.trim(),rokuLeadMs:lead,enabled:enabled.checked,syncMode:syncMode.value==='peer'?'peer':'roku',privacyConsent:{version:1,server:url.origin}};
+    await chrome.storage.local.set(saved);
+    status.textContent=enabled.checked?'Saved. Reload streaming tabs if you changed the relay or room token.':'Saved. Tick Enable Roku sync when ready.';
+  } catch(error) {status.textContent=error.message;}
+};
+document.querySelector('#forget').onclick=async()=>{
+  await chrome.storage.local.set({enabled:false,privacyConsent:null,server:null,token:null,rokuLeadMs:0,syncMode:'roku'});
+  saved={};server.value='http://127.0.0.1:8766';token.value='';rokuLeadMs.value='0';syncMode.value='roku';enabled.checked=false;consent.checked=false;
+  status.textContent='Local relay settings removed. Contact the relay operator about existing room data.';
+};

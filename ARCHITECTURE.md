@@ -91,12 +91,12 @@ How to share the extension with the viewer in Japan:
 - **Option 2 (Best UX + auto-updates): Chrome Web Store "Unlisted"**:
   Upload `dist/roku-netflix-sync-extension.zip` to the [Chrome Web Store Developer Dashboard](https://chrome.google.com/webstore/devconsole) ($5 one-time registration) with visibility set to **Unlisted**. Only people with the direct link can install it in 1 click, and Chrome auto-updates it whenever you push a new version.
 - **Host Permissions for Tunnel URL**:
-  Before packaging for Japan, add `"host_permissions": ["http://127.0.0.1:8766/*", "http://localhost:8766/*", "https://*/*"]` in `extension/manifest.json` so the service worker can talk to your HTTPS Cloudflare Tunnel URL.
+  Relay hosts are declared as optional permissions. Save requests access only for the chosen hostname after the user accepts data sharing. Do not replace this with required access to every HTTPS host.
 - **What `bin/package-extension.sh` checks**:
   The script validates `extension/manifest.json` with `python3 -m json.tool`, resolves every script and HTML file the manifest references and fails if one is missing, then writes `dist/roku-netflix-sync-extension.zip` and prints its contents and size. `tests/test_relay.py::test_package_script_builds_expected_zip` runs it and asserts the archive contains `manifest.json`, `background.js`, `content.js`, `player-bridge.js`, `popup.html`, and `popup.js`.
 
 ### C2. Extension Enable/Disable Toggle ([BEE-227](https://linear.app/beeros/issue/BEE-227/add-extension-enable-disable-toggle-so-solo-netflix-watching-is))
-The popup has an **Enable Roku sync** checkbox at the top, persisted as `enabled` in `chrome.storage.local` and defaulting to `true`.
+The popup has an **Enable Roku sync** checkbox at the top, persisted as `enabled` in `chrome.storage.local`. Sync defaults to off and also requires origin-bound data-sharing consent before any relay traffic.
 
 - The popup saves the checkbox immediately on `change` and also includes it when **Save** is clicked.
 - `background.js` reads `enabled` with the other settings and returns `{disabled: true}` before any relay fetch, so a disabled extension never touches the network.

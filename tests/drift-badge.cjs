@@ -17,6 +17,7 @@ function run(peerPosition) {
     location:{pathname:'/watch/123'},performance:{now:()=>10000},
     setTimeout:(f,delay)=>{timers.push({f,delay});return timers.length},Date,Promise,console
   };
+  ctx.chrome.storage=require('./consented-storage.cjs')();
   vm.runInNewContext(fs.readFileSync('extension/content.js','utf8'),ctx);
   return {badge,timers};
 }

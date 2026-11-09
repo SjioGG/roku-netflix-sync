@@ -1,7 +1,10 @@
 (() => {
   let video=null, title=null, titleSending=false, invalidated=false, seq=null, state=null, attempt=null;
   let notice='', noticeUntil=0, seekGeneration=0, pendingSeek=null, seekInFlight=null, telemetryInFlight=false;
-  let syncEnabled=true, syncMode='roku', pollLoop=0, pollStarted=false, driftMs=null;
+  let syncEnabled=false, syncMode='roku', pollLoop=0, pollStarted=false, driftMs=null;
+  const settings={};
+  const changedSettings=new Set();
+  let roomUsed=false;
   const clientId=(globalThis.crypto?.randomUUID?.() || 'client-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)).slice(0,64);
   const suppressed=new WeakMap();
   document.querySelectorAll?.('[data-roku-sync-overlay]').forEach(node=>node.remove());
@@ -9,6 +12,7 @@
   badge.setAttribute?.('data-roku-sync-overlay',''); badge.setAttribute?.('role','status');
   Object.assign(badge.style,{position:'fixed',top:'20px',right:'20px',zIndex:'2147483647',background:'#171923',color:'#fff',padding:'10px 12px',border:'1px solid #65728b',borderRadius:'8px',font:'12px/1.45 system-ui',maxWidth:'360px',boxShadow:'0 2px 10px #0008',cursor:'pointer'});
   badge.title='Click to re-sync with Roku';badge.setAttribute?.('title','Click to re-sync with Roku');
+  badge.style.display='none';
   badge.textContent='Roku sync: connecting';document.documentElement.appendChild(badge);
   badge.addEventListener?.('click',()=>{
     if(!syncEnabled || invalidated) return;
@@ -20,23 +24,46 @@
   });
   function setSyncEnabled(value) {
     const next=value!==false;
+    if(next===syncEnabled) return;
     pollLoop++;
     if(next) {
+      if(invalidated) return;
       syncEnabled=true;
+      roomUsed=true;
       badge.style.display='';
       if(!invalidated) poll();
     } else {
-      cancelAttempt();pendingSeek=null;++seekGeneration;
       syncEnabled=false;
+      const old=cancelAttempt();pendingSeek=null;++seekGeneration;
+      if(old?.video===video && video?.paused) playQuietly(video).catch(()=>{});
       pollStarted=false;
       badge.style.display='none';
     }
   }
   function setSyncMode(value) {syncMode=value==='peer'?'peer':'roku';}
+  function applySettings() {
+    setSyncMode(settings.syncMode);
+    setSyncEnabled(settings.enabled===true && settings.privacyConsent?.version===1 &&
+      !!settings.server && settings.privacyConsent.server===settings.server);
+  }
   chrome.storage?.onChanged?.addListener?.((changes,area)=>{
     if(area!=='local') return;
-    if(changes.enabled) setSyncEnabled(changes.enabled.newValue!==false);
-    if(changes.syncMode) setSyncMode(changes.syncMode.newValue);
+    const roomChanged=['server','token'].some(key=>changes[key] && changes[key].newValue!==settings[key]);
+    for(const key of ['enabled','privacyConsent','server','token','syncMode']) {
+      if(changes[key]) {settings[key]=changes[key].newValue;changedSettings.add(key);}
+    }
+    if(roomChanged && roomUsed) {
+      // Keep old-room callbacks and scheduled work out of a new room.
+      // As in the original setup flow, reload the tab after changing rooms.
+      setSyncEnabled(false);invalidated=true;
+      if(video) ['play','pause','seeked'].forEach(name=>video.removeEventListener(name,onEvent));
+      video=null;
+      if(settings.enabled===true && settings.privacyConsent?.server===settings.server) {
+        badge.style.display='';say('Relay or room changed. Reload this tab to reconnect.');
+      }
+      return;
+    }
+    applySettings();
   });
 
   function say(message) {notice=message;noticeUntil=performance.now()+(message.startsWith('Sync failed')?30000:10000);badge.textContent=(peerMode()?'Peer sync: ':'Roku sync: ')+message;}
@@ -189,15 +216,17 @@
   function flushSeek() {
     const seek=pendingSeek;pendingSeek=null;
     if(!seek)return seekInFlight || Promise.resolve();
+    const generation=seekGeneration;
     const previous=seekInFlight || Promise.resolve();
     const task=previous.then(async()=>{
+      if(!syncEnabled || invalidated || generation!==seekGeneration) return;
       const inPeerMode=peerMode();
       const wasPlaying=video && !video.paused;
       if(video && wasPlaying && !inPeerMode) pauseQuietly(video);
       say(inPeerMode ? 'Syncing seek to ' + Math.round(seek.position/1000) + 's…' : 'Seeking TV to ' + Math.round(seek.position/1000) + 's…');
       const media=detectMedia();
       const result=await send({type:'event',action:'seek',position:seek.position,client_id:clientId,...(media?{app:media.app}:{})});
-      if(!invalidated) {
+      if(!invalidated && syncEnabled && generation===seekGeneration) {
         if(result.error) {
           say('Sync failed · '+result.error);
           if(video && wasPlaying && video.paused) playQuietly(video).catch(()=>{});
@@ -396,7 +425,6 @@
       waitForRokuReady(current).then(ready=>{
         if(attempt!==current || invalidated) return;
         if(!ready) {
-          attempt=null;
           fallback(current,'Roku did not finish loading.');
           return;
         }
@@ -428,7 +456,7 @@
       if(pathKey!==observedPath){observedPath=pathKey;cancelAttempt();pendingSeek=null;++seekGeneration;title=null;}
       install(document.querySelector('video'));
       const result=await send({type:'read'});
-      if(invalidated || !syncEnabled)return;
+      if(invalidated || !syncEnabled || loop!==pollLoop)return;
       if(result.error){say('Waiting for Roku · '+result.error);return;}
       state=result.data;
       const media=detectMedia();
@@ -502,6 +530,7 @@
     }
   }
   chrome.runtime?.onMessage?.addListener?.((message, sender, respond)=>{
+    if(!syncEnabled) {respond?.({ok:false,disabled:true});return;}
     if(message?.type==='baton-toggle') {batonToggle();respond?.({ok:true});return;}
     if(message?.type==='sync-mode') {
       setSyncMode(message.sync_mode);
@@ -509,11 +538,9 @@
       respond?.({ok:true});return;
     }
   });
-  if(chrome.storage?.local?.get) chrome.storage.local.get(['enabled','syncMode'],res=>{
+  if(chrome.storage?.local?.get) chrome.storage.local.get(['enabled','syncMode','privacyConsent','server','token'],res=>{
     if(invalidated) return;
-    if(res?.syncMode) setSyncMode(res.syncMode);
-    if(res && res.enabled===false) setSyncEnabled(false);
-    else if(!pollStarted) poll();
+    for(const key of Object.keys(res || {})) if(!changedSettings.has(key)) settings[key]=res[key];
+    applySettings();
   });
-  else poll();
 })();

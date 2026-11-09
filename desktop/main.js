@@ -8,6 +8,7 @@
  */
 
 const path = require('node:path')
+require('./local-env.cjs').loadLocalEnv()
 const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron')
 const { DesktopController } = require('./controller.cjs')
 
@@ -47,6 +48,8 @@ function createWindow() {
     },
   })
   window.loadFile(path.join(__dirname, 'index.html'))
+  window.webContents.on('will-navigate', (event) => event.preventDefault())
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.on('closed', () => { window = null })
 
   // The device poll is what makes plugging the soundcard in show up here, so it
@@ -60,9 +63,15 @@ function createWindow() {
 }
 
 function registerIpc() {
-  const handle = (channel, fn) => ipcMain.handle(channel, async (_event, ...args) => fn(...args))
+  const handle = (channel, fn) => ipcMain.handle(channel, async (event, ...args) => {
+    if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) {
+      throw new Error('Only the desktop window can use this API.')
+    }
+    return fn(...args)
+  })
 
   handle('state:snapshot', () => controller.snapshot())
+  handle('config:reveal-token', () => ({ token: controller.getConfig().token }))
   handle('config:save', (patch) => {
     controller.saveConfig(patch || {})
     controller.refreshDevices().catch(() => {})

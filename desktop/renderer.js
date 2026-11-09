@@ -45,6 +45,7 @@ function browserAdapter() {
   return {
     isElectron: false,
     getState: () => call('GET', '/api/state'),
+    revealToken: () => call('POST', '/api/token/reveal'),
     saveConfig: async (patch) => unwrap(await call('POST', '/api/config', { patch })),
     refreshDevices: () => call('POST', '/api/devices/refresh').then(unwrap),
     startAnc: () => call('POST', '/api/anc/start').then(unwrap),
@@ -297,7 +298,7 @@ function renderConfig(state) {
   // Never clobber a field the user is mid-edit on.
   const active = document.activeElement
   if (active !== el.serverUrl) el.serverUrl.value = state.config.serverUrl || ''
-  if (active !== el.roomToken) el.roomToken.value = state.config.token || ''
+  el.roomToken.placeholder = state.tokenConfigured ? 'Saved token (Show or Copy to retrieve)' : 'room token from the relay'
   if (active !== el.rokuUrl) el.rokuUrl.value = state.config.rokuUrl || ''
   el.configPath.textContent = state.configPath || el.configPath.textContent
   // The badge tells you the token came off disk, not out of a paste a second ago.
@@ -500,11 +501,21 @@ function appendLog(entry) {
 /* ------------------------------------------------------------------------- */
 /* Events                                                                    */
 /* ------------------------------------------------------------------------- */
+let tokenEdited = false
+const connectionPatch = () => ({
+  serverUrl: el.serverUrl.value.trim(),
+  rokuUrl: el.rokuUrl.value.trim(),
+  ...(tokenEdited ? { token: el.roomToken.value } : {}),
+})
 const saveConfig = async (patch) => {
   try {
-    renderState(await api.saveConfig(patch))
+    const state = await api.saveConfig(patch)
+    if (Object.prototype.hasOwnProperty.call(patch, 'token') && el.roomToken.value === patch.token) tokenEdited = false
+    renderState(state)
+    return true
   } catch (error) {
     appendLog({ source: 'config', line: error.message })
+    return false
   }
 }
 
@@ -516,25 +527,28 @@ el.outSelect.addEventListener('change', () => saveConfig({ preferredOutDevice: e
 let configTimer = null
 const scheduleConfigSave = () => {
   clearTimeout(configTimer)
-  configTimer = setTimeout(() => saveConfig({
-    serverUrl: el.serverUrl.value.trim(),
-    token: el.roomToken.value,
-    rokuUrl: el.rokuUrl.value.trim(),
-  }), 400)
+  configTimer = setTimeout(() => saveConfig(connectionPatch()), 400)
 }
 el.serverUrl.addEventListener('input', scheduleConfigSave)
-el.roomToken.addEventListener('input', scheduleConfigSave)
+el.roomToken.addEventListener('input', () => { tokenEdited = true; scheduleConfigSave() })
 el.rokuUrl.addEventListener('input', scheduleConfigSave)
 
-el.toggleToken.addEventListener('click', () => {
+const tokenForAction = async () => tokenEdited ? el.roomToken.value : (await api.revealToken()).token || ''
+el.toggleToken.addEventListener('click', async () => {
   const hidden = el.roomToken.type === 'password'
+  if (hidden) {
+    try { el.roomToken.value = await tokenForAction() }
+    catch { appendLog({ source: 'config', line: 'Could not retrieve the saved token.' }); return }
+  } else if (!tokenEdited) el.roomToken.value = ''
   el.roomToken.type = hidden ? 'text' : 'password'
   el.toggleToken.textContent = hidden ? 'Hide' : 'Show'
   el.toggleToken.setAttribute('aria-label', hidden ? 'Hide token' : 'Show token')
 })
 
 el.copyToken.addEventListener('click', async () => {
-  const text = el.roomToken.value
+  let text
+  try { text = await tokenForAction() }
+  catch { appendLog({ source: 'config', line: 'Could not retrieve the saved token.' }); return }
   const copied = await api.copy(text)
   if (copied) {
     el.copyToken.textContent = 'Copied!'
@@ -607,9 +621,7 @@ el.selftest.addEventListener('click', async () => {
 el.startBridge.addEventListener('click', async () => {
   // Flush any pending typing before the bridge picks up the config.
   clearTimeout(configTimer)
-  await saveConfig({ serverUrl: el.serverUrl.value.trim(),
-    token: el.roomToken.value,
-    rokuUrl: el.rokuUrl.value.trim() })
+  if (!await saveConfig(connectionPatch())) return
   renderState(await api.startBridge())
 })
 el.stopBridge.addEventListener('click', async () => {

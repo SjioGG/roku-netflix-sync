@@ -39,6 +39,10 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+if __name__ == '__main__':
+    from local_env import load_local_env
+    load_local_env()
+
 DEFAULT_SERVER_URL = 'http://127.0.0.1:8766'
 DEFAULT_ROKU_URL = 'http://192.168.1.100:8060'
 DEFAULT_POLL_MS = 300
@@ -61,15 +65,40 @@ SAMPLE_CONFIRM_INTERVAL_S = 0.2
 STREAMING_APPS = {'12': 'Netflix', '837': 'YouTube', '13535': 'Plex', '13': 'Prime Video', '291097': 'Disney Plus', '61322': 'HBO Max', '551012': 'Apple TV', '2285': 'Hulu', '624064': 'Nebula', '817397': 'Twitch'}
 
 
+def validate_relay_url(url, origin_only=False):
+    message = 'Use HTTPS for the relay, or localhost HTTP, without embedded credentials.'
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        valid = (parsed.scheme == 'https' or
+                 (parsed.scheme == 'http' and parsed.hostname in {'127.0.0.1', 'localhost', '::1'}))
+        valid = valid and bool(parsed.hostname) and not parsed.username and not parsed.password
+        parsed.port
+        if origin_only:
+            valid = valid and parsed.path in {'', '/'} and not parsed.query and not parsed.fragment
+        if not valid:
+            raise ValueError(message)
+    except ValueError:
+        raise ValueError(message) from None
+    return url.rstrip('/')
+
+
+class NoRelayRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
 def http(url, data=None, method=None, timeout=5, token=None, content_type=None):
     """Open ``url`` and return the response body as bytes."""
     headers = {}
+    if token is not None:
+        validate_relay_url(url)
     if token:
         headers['Authorization'] = 'Bearer ' + token
     if content_type:
         headers['Content-Type'] = content_type
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    transport = urllib.request.build_opener(NoRelayRedirects()).open if token is not None else urllib.request.urlopen
+    with transport(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -406,7 +435,7 @@ def status_line(summary):
 
 def run_forever(server_url=None, token=None, roku_url=None, poll_ms=None):
     """Poll the Roku and serve relay commands until interrupted."""
-    server_url = server_url or os.environ.get('SYNC_SERVER_URL', DEFAULT_SERVER_URL)
+    server_url = validate_relay_url(server_url or os.environ.get('SYNC_SERVER_URL', DEFAULT_SERVER_URL), origin_only=True)
     token = token if token is not None else os.environ.get('SYNC_TOKEN', '')
     roku_url = roku_url or os.environ.get('ROKU_URL', DEFAULT_ROKU_URL)
     poll_ms = poll_ms or int(os.environ.get('ROKU_CLIENT_POLL_MS', str(DEFAULT_POLL_MS)))

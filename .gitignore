@@ -7,3 +7,12 @@ recordings/
 .env
 desktop/node_modules/
 desktop/.electron-cache/
+dist/
+*.wav
+*.log
+.env.*
+!.env.example
+desktop-config.json
+*.tmp
+release-bundle/
+build.tar.gz

@@ -4,6 +4,10 @@ import hmac, json, os, re, secrets, threading, time, urllib.parse, urllib.reques
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+if __name__ == '__main__':
+    from local_env import load_local_env
+    load_local_env()
+
 ROKU = os.environ.get('ROKU_URL', 'http://192.168.1.100:8060').rstrip('/')
 TOKEN = os.environ.get('SYNC_TOKEN') or secrets.token_urlsafe(24)
 # Local diagnostic sampler; optional now that :func:`sample_paused_direct` exists.
@@ -751,7 +755,7 @@ class Handler(BaseHTTPRequestHandler):
                             reply_code, reply_payload = 200, result
                 else:
                     try:
-                        request=urllib.request.Request(DASHBOARD_SAMPLE_URL,data=b'',method='POST')
+                        request=urllib.request.Request(DASHBOARD_SAMPLE_URL,data=b'',method='POST',headers={'Content-Type':'application/json'})
                         with urllib.request.urlopen(request,timeout=9) as response: result=json.load(response)
                     except (urllib.error.URLError, OSError) as exc:
                         # No dashboard on this host: fall back to the direct sampler.

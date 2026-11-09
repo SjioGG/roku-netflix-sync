@@ -1,0 +1,74 @@
+# Version 0.3.3 verification
+
+November 9, 2026. Changes are uncommitted on top of
+`091de5023a1e042661c8e141f1c162a064231990`.
+
+## Implemented
+
+- Sync remains off on new and existing installations until explicit data-sharing consent and enablement. Consent is bound to the chosen relay origin.
+- The popup requests optional access for the chosen relay hostname during Save. It rejects remote HTTP, credentials embedded in URLs, paths, and queries. The background checks the grant and rechecks consent/settings after the asynchronous permission lookup. Requests reject redirects and omit ambient cookies.
+- Withdrawal stops new relay requests and playback controls. Forget clears local connection settings. Changing an active relay or room token detaches old-room controls and requires a streaming-tab reload.
+- The Roku readiness timeout resumes native playback instead of leaving Chrome paused. Existing sync and private Netflix player bridge functionality are retained.
+- A bundled privacy policy, accurate experimental-service/setup disclosures, store copy, dashboard instructions, and an authentic unconfigured popup screenshot are included.
+
+## Passed checks
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+for test in tests/*.cjs; do node "$test" || exit 1; done
+./bin/package-extension.sh
+unzip -t dist/roku-netflix-sync-extension.zip
+git diff --check
+```
+
+At the initial extension checkpoint, all 146 Python tests and the JavaScript checks passed. Added coverage exercises
+missing and withdrawn consent, relay changes, permission denial/revocation,
+withdrawal during the permission check, credential forgetting, and readiness
+timeout recovery. Existing content/background fixtures now explicitly model
+consented users rather than relying on implicit enablement.
+
+Google Chrome for Testing 143.0.7499.4 loaded the unpacked extension in an
+isolated temporary profile. The default-off popup rendered without page errors,
+and its privacy link opened the packaged policy successfully. The actual popup
+was captured at 1280 x 800 in `screenshots/popup-0.3.3.png`. It represents setup,
+not an active playback demonstration.
+
+## Still external or unverified
+
+- Headless Chromium displayed/pended the optional host permission request but did not resolve its native approval dialog. Interactive Chrome approval still needs checking. Grant and denial behavior is covered by the popup/background tests.
+- No live streaming-account or physical Roku end-to-end test was performed in this change. Service parity and exact timing are not claimed.
+- At the initial source-verification checkpoint, the developer dashboard had not yet been modified. Publish the public policy, confirm deployed relay operators/providers/logging, replace rejected screenshots, and update listing/privacy/reviewer fields using `chrome-web-store.md` before resubmission.
+- The original blank-block screenshot remains on disk for preservation and must not be uploaded again.
+- Automatic Netflix synchronization still has unverified contractual compatibility. The changes do not establish Netflix authorization, legal approval, or Chrome Web Store acceptance. Removing automatic Netflix control would materially change the app and was not done.
+
+## Developer dashboard update
+
+On November 9, 2026, the signed-in Chrome Web Store dashboard was updated as
+a draft. The detailed description and public links were corrected, the rejected
+blank-block screenshot was replaced with the actual popup, and data categories
+were set to authentication information, location (connection IP), web history
+(current media), user activity, and website content. The original three
+limited-use declarations were already selected and were preserved. Remote code
+remains No. Distribution was already Unlisted and was preserved.
+
+Public policy: https://sjiogg.github.io/roku-sync-privacy/
+Public policy/support repository: https://github.com/SjioGG/roku-sync-privacy
+Pages build commit: `24b24a9f0cd1cc0da3202b6d09aa9d0621e815f4`.
+The policy page was verified in an anonymous browser profile. At that dashboard-update checkpoint, the app repository was still private. An earlier temporary Sites copy was changed
+to owner-only access after GitHub Pages was chosen.
+
+The draft package was verified as version 0.3.3 after upload. The saved privacy
+policy URL was rechecked as https://sjiogg.github.io/roku-sync-privacy/ and the
+Submit for review button became available. It was not clicked.
+
+At that checkpoint, reviewer instructions still required a usable dedicated
+review relay/token or relay-source access; making the audited source public
+would enable the documented local-review procedure. No personal room credentials were supplied to
+Google, and no review submission was made.
+
+## Subsequent publication-security verification
+
+The subsequent repository audit passed all 154 Python tests and all JavaScript
+checks, including 40 desktop checks. Local settings are ignored and owner-only;
+public fixtures use fictional device identifiers. See `publication-audit.md` for
+scope, fixes, historical-data limits, and the pending publication migration.

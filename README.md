@@ -1,7 +1,29 @@
 # Roku Netflix Sync
 
-Local experiment connecting Netflix in Chrome to a Roku on the same LAN.
+Experimental playback synchronization between Chrome tabs, or between Chrome
+and a Roku through a separately configured relay and optional home bridge.
+This is an unofficial project, not affiliated with or endorsed by Roku, Netflix,
+or the other streaming services. Each viewer needs their own authorized access
+to the content; synchronization does not provide a subscription or video stream.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, roadmap, packaging guide, acoustic echo cancellation (AEC) design, and Linear tickets ([BEE-218](https://linear.app/beeros/issue/BEE-218/roku-netflix-sync-cross-country-netflix-watch-party-for-roku-chrome)).
+
+On first setup, copy `.env.example` to an untracked `.env`, set your relay URL,
+Roku LAN URL, and a strong room token, then run the services. Do not overwrite an
+existing `.env`. Python entry points and the desktop launcher load that local
+file; exported environment variables take precedence. Saved desktop settings
+still take precedence over the desktop's initial defaults.
+
+```sh
+cp -n .env.example .env
+chmod 600 .env
+```
+
+The optional `LOCAL_DEVICE_SERIAL`, `LOCAL_DEVICE_UUID`, and `LOCAL_WIFI_SSID`
+entries are private reference notes. The app queries the Roku for live device
+metadata; the notes never replace discovery results or public test fixtures.
+`.env` is excluded from Git, Docker build contexts, and extension packages.
+`ROKU_SYNC_ENV_FILE` selects another file; setting it to an empty string disables
+local-file loading for isolated tests.
 
 Start both services from this folder:
 
@@ -13,12 +35,29 @@ python3 sync_server.py
 The dashboard is at http://127.0.0.1:8765. The authenticated relay is at
 http://127.0.0.1:8766. Set `SYNC_TOKEN` to configure the room token (the relay
 never logs the token to stdout/journald). Keep tokens out of source files.
-`ROKU_URL` configures the relay's Roku endpoint; the diagnostic dashboard currently
-uses the original local device address.
+`ROKU_URL` configures the relay, bridge and diagnostic dashboard Roku endpoint.
+Public examples use an illustrative LAN address; configure your own device.
 
 Load `extension/` as an unpacked Chrome extension, configure the relay URL and
-token in its popup, and reload Netflix after extension updates. Chrome's Errors
-panel retains old errors until cleared.
+token in its popup, read the data-sharing disclosure, explicitly accept it,
+tick **Enable Roku sync**, and save. Sync stays off until consent is given,
+including after updating from a version without this disclosure. Saving requests Chrome access for the chosen
+relay host. HTTPS relays are supported on user-selected hosts; unencrypted HTTP
+is restricted to `localhost` and `127.0.0.1`. Reload your streaming tab after
+setup or extension updates. Chrome's Errors panel retains old errors until
+cleared. Reload streaming tabs when changing the relay or room token so that
+old-room state cannot affect the new room.
+
+Read the [privacy policy](PRIVACY.md) before connecting a
+relay. Enabled sync sends the current service/media identifier, playback
+position, play/pause and buffer state, timing information, and a random per-tab
+identifier to that relay. The relay operator and anyone with the room token can
+access room state and control playback. Use a relay you trust and share the
+token only with intended participants. Disabling sync stops subsequent relay
+requests; it does not delete data already received by the relay.
+
+The [Chrome Web Store submission guide](docs/chrome-web-store.md) contains the
+listing copy, privacy declarations, review setup, and screenshot checklist.
 
 The popup's **Enable Roku sync** checkbox ([BEE-227](https://linear.app/beeros/issue/BEE-227/add-extension-enable-disable-toggle-so-solo-netflix-watching-is))
 turns the extension off completely: no relay requests, no badge, and native
@@ -32,14 +71,22 @@ seek, while the other tabs follow it. The badge reads `Peer sync (Master)` or
 `Peer sync (Slave)`, and clicking it passes or claims the baton, as does the
 popup's **Claim / Pass Master Baton** button.
 
-The content script now runs on Netflix, YouTube, Plex, Prime Video, Disney+,
-Max, Apple TV, Hulu and Twitch ([BEE-229](https://linear.app/beeros/issue/BEE-229)). YouTube and the other HTML5 players
-seek their own `<video>` element directly; Netflix keeps its Cadmium bridge.
+The content script runs on Netflix, YouTube, Plex, Prime Video, Disney+,
+Max, Apple TV, Hulu and Twitch ([BEE-229](https://linear.app/beeros/issue/BEE-229)). These integrations are experimental and do not have feature parity.
+YouTube and the other HTML5 players seek their own `<video>` element directly;
+Netflix keeps its internal player bridge. Roku title deep links are implemented
+for Netflix and YouTube. Other integrations may launch only the Roku app and
+require selecting the same title manually. Roku-to-browser playback handling
+and badge re-sync currently target Netflix watch pages. Generic HTML5 controls
+and URL-derived media identifiers may not work with every player, episode,
+live stream, or service update; the presence of a site in the manifest does not
+establish end-to-end compatibility.
 
 ## Native Netflix controls
 
-The extension adds only a compact status indicator. Use Netflix's own playback
-buttons, keyboard controls and timeline. There are no injected seek or sync buttons.
+The extension adds a compact, clickable sync-status indicator. Use Netflix's own
+playback buttons, keyboard controls and timeline; the extension can mirror or
+adjust playback while sync is enabled.
 
 - Selecting a watch page requests that Netflix or YouTube title on Roku. If the
   Roku lands on the episode overview screen (Netflix) or its splash/player
@@ -73,6 +120,11 @@ reliably effective on this device, so exact seek requests remain explicitly
 unsupported in the relay. Scheduled start therefore requires manually aligned
 positions. Cross-country end-to-end synchronization within 500 ms is not verified.
 
+Netflix supports ordinary pause and seek controls. This implementation also
+injects code and automates playback, including an internal Netflix player API;
+compatibility with Netflix's contractual restrictions has not been established.
+Chrome Web Store approval would not itself establish Netflix authorization.
+
 The default bind addresses are loopback. A Cloudflare Tunnel can route to port
 8766; only relay clients with the room token can control the Roku. The dashboard
 is a separate local diagnostic; the relay no longer requires it (see
@@ -99,12 +151,12 @@ SYNC_TOKEN='pick-a-room-token' docker compose up -d
 docker compose logs -f sync-server
 ```
 
-`docker-compose.yml` publishes port 8766 and sets `ROKU_BRIDGE_ONLY=1`, so every
+`docker-compose.yml` publishes port 8766 on host loopback only and sets `ROKU_BRIDGE_ONLY=1`, so every
 Roku command is queued for the bridge instead of dialled directly. For a bare
 VPS, copy `deploy/roku-sync-server.service` to `/etc/systemd/system/`, put the
 token in `/etc/roku-sync/sync.env`, then `systemctl enable --now roku-sync-server`.
 `SYNC_HOST` defaults to `127.0.0.1`; set `SYNC_HOST=0.0.0.0` (or bind loopback
-behind a Cloudflare Tunnel) for the container.
+behind an HTTPS reverse proxy) for the container.
 
 ### 2. Bridge client at home
 
@@ -297,7 +349,7 @@ second.
   the USB soundcard in switches the active mic without a restart.
 
 Settings persist at `~/.config/roku-netflix-sync/desktop-config.json`:
-`serverUrl` (default `http://127.0.0.1:8766`), `token`, `rokuUrl` (default
+`serverUrl` (default `http://127.0.0.1:8766`, or your local environment setting), `token`, `rokuUrl` (default
 `http://192.168.1.100:8060`), `autoPickSoundcard`, `preferredMicDevice`,
 `preferredRefDevice` and `preferredOutDevice`.
 
@@ -342,3 +394,34 @@ ROKU_SYNC_DESKTOP_SMOKE=1 ./bin/launch-desktop.sh --electron --foreground
 `tests/test_aec.py` additionally needs only the standard library: it forces the
 pure-Python FFT path even when `numpy` is installed, which is what the CI runner
 uses.
+
+## Local controls and relay trust
+
+The desktop HTTP UI and diagnostic dashboard are local-only tools. They reject
+foreign Host/Origin requests, cross-site browser API requests, and non-JSON
+writes. The desktop UI refuses non-loopback binds; `ROKU_DESKTOP_HOST` cannot be
+used to expose it on the LAN. Use the authenticated relay, behind an HTTPS
+proxy or tunnel, for remote participants. The Docker port is loopback-bound by
+default; a proxy in another container needs a deliberately configured private
+network path rather than a public plaintext port.
+
+Desktop state polling excludes the saved room token. Show and Copy retrieve it
+only on request, and the config file is written with owner-only permissions.
+Editing another setting or starting the bridge preserves a masked saved token;
+explicitly clearing the token field clears it. The local HTTP API has no separate login and trusts processes on this machine;
+local processes can call it, including its explicit token-reveal action. Use it
+on a trusted desktop, not as a shared or remotely exposed control service.
+Applications running with your user privileges can also read the local config.
+
+The relay uses one shared bearer token for the whole room, not separate user
+accounts or read-only invites. A token holder can control the Roku and request
+ECP device information, including serial and network metadata. Do not expose a
+room publicly or share its token with untrusted users. There is no built-in
+login lockout or rate limiter; restrict a hosted relay at its HTTPS proxy if
+needed. The extension and bridge reject remote HTTP; the bridge also refuses
+redirects for authenticated relay requests.
+
+`PRIVACY.md` is the canonical policy. Run `python3 bin/render-privacy.py` to
+regenerate the extension's bundled HTML, or use `bin/package-extension.sh`,
+which does this automatically. Once the application repository is public, its
+rendered Markdown URL can be used directly in the Chrome Web Store dashboard.

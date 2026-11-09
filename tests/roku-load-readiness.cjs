@@ -2,6 +2,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 // BEE-230: a play pressed while Roku is still loading waits up to 60s for the
 // player instead of failing after the regular 10s alignment timeout.
 function run(){
+  let now=Date.now();
   const listeners={},timers=[],messages=[];
   const video={paused:true,currentTime:21,readyState:2,
     addEventListener:(n,f)=>listeners[n]=f,removeEventListener:n=>delete listeners[n],
@@ -13,8 +14,8 @@ function run(){
     document:{createElement:()=>badge,documentElement:{appendChild(){}},querySelector:()=>video,querySelectorAll:()=>[]},
     chrome:{runtime:{sendMessage(m,cb){
       messages.push(m);
-      if(m.type==='read')cb({data:{seq:0,roku:relay.roku,last_update:Date.now()/1000,
-        launch_status:relay.launch_status,launch_started:Date.now()/1000-3,title_id:'123'}});
+        if(m.type==='read')cb({data:{seq:0,roku:relay.roku,last_update:now/1000,
+        launch_status:relay.launch_status,launch_started:now/1000-3,title_id:'123'}});
       else if(m.type==='sample')cb({data:{sample_id:'fixture',after:'21000 ms'}});
       else if(m.type==='clock')cb({data:{server_ms:Date.now(),received_ms:Date.now()}});
       else if(m.type==='schedule')cb({data:{id:'fixture-start',start_ms:Date.now()+4000,roku_one_way_ms:20}});
@@ -23,13 +24,14 @@ function run(){
     location:{hostname:'www.netflix.com',pathname:'/watch/123',search:''},
     performance:{now:()=>10000},
     setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length},
-    Date,Promise,console
+    Date:{now:()=>now},Promise,console
   };
+  ctx.chrome.storage=require('./consented-storage.cjs')();
   vm.runInNewContext(fs.readFileSync('extension/content.js','utf8'),ctx);
   const settle=async()=>{await new Promise(setImmediate);await new Promise(setImmediate)};
   // Fire one round of pending timers (the 750ms readiness poll or the 10s guard).
   const tick=async()=>{timers.splice(0).forEach(t=>t.fn());await settle()};
-  return {video,listeners,messages,badge,relay,settle,tick};
+  return {video,listeners,messages,badge,relay,settle,tick,advance:ms=>{now+=ms}};
 }
 
 (async()=>{
@@ -69,5 +71,14 @@ function run(){
   await playing.tick();
   assert(playing.messages.some(m=>m.type==='sample'),'sampling still runs after the safety pause');
 
-  console.log('Roku load readiness waits for the player before sampling and starting');
+  const timeout=run();
+  await timeout.settle();
+  await timeout.video.play();
+  assert(timeout.video.paused,'play waits for the loading Roku');
+  timeout.advance(61000);
+  await timeout.tick();
+  assert.equal(timeout.video.paused,false,'failed readiness resumes native playback');
+  assert(timeout.messages.some(m=>m.type==='event' && m.action==='play'),'normal playback resumes through the usual play path');
+
+  console.log('Roku readiness waits for loading, then schedules or resumes native playback on timeout');
 })().catch(error=>{console.error(error);process.exit(1)});

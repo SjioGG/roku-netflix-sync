@@ -829,6 +829,7 @@ class RelayTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(workflow),'..','..','aec_daemon.py')))
 
 
+# Deliberately synthetic device identifiers and Wi-Fi names. Do not paste live device responses here.
 DEVICE_INFO_XML = b'''<?xml version="1.0" encoding="UTF-8" ?>
 <device-info>
   <udn>00000000-0000-4000-8000-000000000001</udn>
@@ -1014,7 +1015,7 @@ class RokuDiscoveryTest(unittest.TestCase):
         result = subprocess.run([sys.executable, script, '--discover', '--json',
                                  '--seed-url', 'http://127.0.0.1:1'],
                                 capture_output=True, text=True, timeout=40,
-                                env=dict(os.environ, ROKU_URL='http://127.0.0.1:1'))
+                                env=dict(os.environ, ROKU_URL='http://127.0.0.1:1', ROKU_SYNC_ENV_FILE=''))
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertIn('devices', payload)
@@ -1027,7 +1028,7 @@ class RokuDiscoveryTest(unittest.TestCase):
         result = subprocess.run([sys.executable, script, '--discover',
                                  '--seed-url', 'http://127.0.0.1:1'],
                                 capture_output=True, text=True, timeout=40,
-                                env=dict(os.environ, ROKU_URL='http://127.0.0.1:1'))
+                                env=dict(os.environ, ROKU_URL='http://127.0.0.1:1', ROKU_SYNC_ENV_FILE=''))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Roku device(s)', result.stdout)
 

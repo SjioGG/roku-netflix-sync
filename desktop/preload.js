@@ -9,6 +9,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('rokuDesktop', {
   isElectron: true,
   getState: () => ipcRenderer.invoke('state:snapshot'),
+  revealToken: () => ipcRenderer.invoke('config:reveal-token'),
   saveConfig: (patch) => ipcRenderer.invoke('config:save', patch),
   refreshDevices: () => ipcRenderer.invoke('devices:refresh'),
   startAnc: () => ipcRenderer.invoke('anc:start'),

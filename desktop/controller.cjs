@@ -16,12 +16,13 @@ const path = require('node:path')
 const { EventEmitter } = require('node:events')
 const { spawn } = require('node:child_process')
 const readline = require('node:readline')
+const { randomUUID } = require('node:crypto')
 const { performance } = require('node:perf_hooks')
 
 const DEFAULT_CONFIG = Object.freeze({
-  serverUrl: 'http://127.0.0.1:8766',
-  token: '',
-  rokuUrl: 'http://192.168.1.100:8060',
+  serverUrl: process.env.SYNC_SERVER_URL || 'http://127.0.0.1:8766',
+  token: process.env.SYNC_TOKEN || '',
+  rokuUrl: process.env.ROKU_URL || 'http://192.168.1.100:8060',
   autoPickSoundcard: true,
   preferredMicDevice: '',
   preferredRefDevice: '',
@@ -65,6 +66,15 @@ function normaliseConfig(raw) {
   return config
 }
 
+function relayOrigin(value) {
+  const message = 'Use an HTTPS relay origin or localhost HTTP, without credentials, paths or queries.'
+  let url
+  try { url = new URL(value) } catch { throw new Error(message) }
+  if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) ||
+      url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error(message)
+  return url.origin
+}
+
 function classifyMicSource(source) {
   if (source === 'usb') return 'Auto: External Soundcard'
   if (source === 'builtin') return 'Auto: MacBook Mic'
@@ -93,8 +103,7 @@ function describePingMath(result) {
       + `(= lead ${result.adaptive_lead_ms} − effective lead ${result.effective_roku_lead_ms}).`,
     `Chrome fires video.play() at t=${result.chrome_fire_at_ms} ms on its own clock `
       + `(= lead, shifted by the ${result.clock_offset_ms} ms offset).`,
-    `Both frames land together within ${Math.max(1, Math.abs(result.effective_roku_lead_ms))} ms of the lead, `
-      + `well inside the 500 ms tolerance.`,
+    'Target: 500 ms tolerance. These timing estimates do not prove displayed-frame alignment.',
   ].join('\n')
 }
 
@@ -176,10 +185,14 @@ class DesktopController extends EventEmitter {
 
   saveConfig(patch = {}) {
     const next = normaliseConfig(Object.assign({}, this.config, patch))
-    fs.mkdirSync(path.dirname(this.configPath), { recursive: true })
-    const temp = this.configPath + '.tmp'
-    fs.writeFileSync(temp, JSON.stringify(next, null, 2) + '\n', 'utf8')
-    fs.renameSync(temp, this.configPath)
+    fs.mkdirSync(path.dirname(this.configPath), { recursive: true, mode: 0o700 })
+    const temp = this.configPath + '.' + randomUUID() + '.tmp'
+    try {
+      fs.writeFileSync(temp, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+      fs.renameSync(temp, this.configPath)
+    } finally {
+      fs.rmSync(temp, { force: true })
+    }
     this.config = next
     this.emit('state', this.snapshot())
     return next
@@ -504,7 +517,7 @@ class DesktopController extends EventEmitter {
   // -- Roku bridge ----------------------------------------------------------
   bridgeEnv() {
     return {
-      SYNC_SERVER_URL: this.config.serverUrl,
+      SYNC_SERVER_URL: relayOrigin(this.config.serverUrl),
       SYNC_TOKEN: this.config.token,
       ROKU_URL: this.config.rokuUrl,
       ROKU_CLIENT_STATUS_JSON: '1',
@@ -513,13 +526,20 @@ class DesktopController extends EventEmitter {
 
   startRokuBridge() {
     if (this._children.bridge) return { started: false, reason: 'already running' }
+    let env
+    try { env = this.bridgeEnv() } catch (error) {
+      this.bridge.state = 'error'
+      this.bridge.error = error.message
+      this.emit('state', this.snapshot())
+      return { started: false, reason: error.message }
+    }
     this.bridge.running = true
     this.bridge.state = 'connecting'
     this.bridge.error = null
     this.bridge.roku = null
     this.bridge.app_name = null
     this.bridge.position_ms = null
-    const child = this._launch('bridge', 'roku_client.py', [], this.bridgeEnv(),
+    const child = this._launch('bridge', 'roku_client.py', [], env,
       (line) => this._onBridgeLine(line),
       (error, exit) => this._onBridgeExit(error, exit))
     if (!child) return { started: false, reason: this.bridge.error || 'spawn failed' }
@@ -615,9 +635,9 @@ class DesktopController extends EventEmitter {
     return new Promise((resolve, reject) => {
       let target
       try {
-        target = new URL(this.config.serverUrl.replace(/\/+$/, '') + '/clock')
+        target = new URL('/clock', relayOrigin(this.config.serverUrl))
       } catch (error) {
-        reject(new Error(`invalid server URL: ${this.config.serverUrl}`))
+        reject(error)
         return
       }
       const transport = target.protocol === 'https:' ? require('node:https') : require('node:http')
@@ -771,8 +791,11 @@ class DesktopController extends EventEmitter {
 
   // -- snapshot -------------------------------------------------------------
   snapshot() {
+    const config = this.getConfig()
+    delete config.token
     return {
-      config: this.getConfig(),
+      config,
+      tokenConfigured: Boolean(this.config.token),
       configPath: this.configPath,
       configLoadedFromDisk: Boolean(this.configLoadedFromDisk),
       tokenFromConfigFile: Boolean(this.configLoadedFromDisk && this.config.token),

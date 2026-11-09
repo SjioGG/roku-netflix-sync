@@ -17,7 +17,7 @@ const ctx={
   },
   chrome:{
     storage:{
-      local:{get:(keys,cb)=>{if(cb)cb({enabled:true});return Promise.resolve({enabled:true})}},
+      local:{get:(keys,cb)=>{if(cb)cb({enabled:true,server:'http://127.0.0.1:8766',privacyConsent:{version:1,server:'http://127.0.0.1:8766'}});return Promise.resolve({enabled:true,server:'http://127.0.0.1:8766',privacyConsent:{version:1,server:'http://127.0.0.1:8766'}})}},
       onChanged:{addListener:f=>{onStorageChanged=f}}
     },
     runtime:{sendMessage(m,cb){

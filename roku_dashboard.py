@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import re
 import urllib.parse
 import time
@@ -9,7 +10,11 @@ import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROKU = 'http://192.168.1.100:8060'
+if __name__ == '__main__':
+    from local_env import load_local_env
+    load_local_env()
+
+ROKU = os.environ.get('ROKU_URL', 'http://192.168.1.100:8060').rstrip('/')
 KEYS = {'Home', 'Back', 'Up', 'Down', 'Left', 'Right', 'Select', 'Play', 'Rev', 'Fwd', 'InstantReplay', 'Info'}
 # Roku ECP plugin IDs for the streaming apps the sampler accepts as a live player.
 STREAMING_APPS = {'12': 'Netflix', '837': 'YouTube', '13535': 'Plex', '13': 'Prime Video', '291097': 'Disney Plus', '61322': 'HBO Max', '551012': 'Apple TV', '2285': 'Hulu', '624064': 'Nebula', '817397': 'Twitch'}
@@ -22,10 +27,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Content-Security-Policy', "frame-ancestors 'none'")
+        self.send_header('X-Content-Type-Options', 'nosniff')
         self.end_headers()
         self.wfile.write(data if isinstance(data, bytes) else json.dumps(data).encode())
 
+    def local_request_allowed(self, require_json=False):
+        authority = self.headers.get('Host', '')
+        try:
+            origin = urllib.parse.urlsplit('http://' + authority)
+            valid = (origin.hostname in {'127.0.0.1', 'localhost', '::1'} and
+                     not origin.username and not origin.password and not origin.path and
+                     not origin.query and not origin.fragment)
+            origin.port  # Reject malformed ports before processing commands.
+        except ValueError:
+            valid = False
+        if not valid:
+            self.reply(403, {'error': 'Local host required'})
+            return False
+        if self.path != '/' or require_json:
+            site = self.headers.get('Sec-Fetch-Site')
+            source = self.headers.get('Origin')
+            if (site and site not in {'same-origin', 'none'}) or (source and source != 'http://' + authority):
+                self.reply(403, {'error': 'Same-origin requests required'})
+                return False
+        if require_json and self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+            self.reply(415, {'error': 'application/json required'})
+            return False
+        return True
+
     def do_GET(self):
+        if not self.local_request_allowed():
+            return
         if self.path == '/':
             return self.reply(200, Path(__file__).with_name('dashboard.html').read_bytes(), 'text/html; charset=utf-8')
         if self.path != '/state':
@@ -40,6 +74,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(502, {'error': str(e)})
 
     def do_POST(self):
+        if not self.local_request_allowed(require_json=True):
+            return
         if self.path == '/sample-paused':
             started = time.monotonic()
             timings = []

@@ -6,6 +6,8 @@ EXT_DIR="$ROOT_DIR/extension"
 DIST_DIR="$ROOT_DIR/dist"
 OUT_ZIP="$DIST_DIR/roku-netflix-sync-extension.zip"
 
+python3 "$ROOT_DIR/bin/render-privacy.py"
+
 MANIFEST="$EXT_DIR/manifest.json"
 [ -f "$MANIFEST" ] || { echo "Missing $MANIFEST" >&2; exit 1; }
 python3 -m json.tool "$MANIFEST" > /dev/null

@@ -1,6 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),harness=require('./native-harness.cjs');
 const h=harness();let listener,request;
-const ctx={chrome:{runtime:{onMessage:{addListener:f=>listener=f}},storage:{local:{get:async()=>({server:'http://127.0.0.1:8766',token:'fixture'})}}},URL,AbortSignal,performance,fetch:async(url,options)=>{request={url,options};return {ok:true,json:async()=>({received_at_ms:1})}}};
+const ctx={chrome:{runtime:{onMessage:{addListener:f=>listener=f}},storage:{local:{get:async()=>({server:'http://127.0.0.1:8766',token:'fixture',enabled:true,privacyConsent:{version:1,server:'http://127.0.0.1:8766'}})}}},URL,AbortSignal,performance,fetch:async(url,options)=>{request={url,options};return {ok:true,json:async()=>({received_at_ms:1})}}};
+ctx.chrome.permissions={contains:async()=>true};
 vm.runInNewContext(fs.readFileSync('extension/background.js','utf8'),ctx);
 setImmediate(async()=>{
   const m=h.messages.find(x=>x.type==='telemetry');assert(m);assert.equal(m.data.title_id,'123');assert.equal(m.data.position_ms,21000);assert.equal(m.data.paused,true);assert.equal(m.data.ready_state,2);
