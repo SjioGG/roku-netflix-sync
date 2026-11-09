@@ -65,8 +65,9 @@ it is for a trusted desktop. The shared room token grants full room/device
 control. There is no built-in authentication rate limiter. Hosted deployments
 need a suitable HTTPS proxy and operator controls.
 
-No live streaming-account/Roku or native permission-dialog end-to-end validation
-was added by this audit. Netflix contractual authorization remains unverified.
+The initial audit did not include live Roku or native permission-dialog
+validation. Subsequent interactive checks are recorded in
+compliance-verification.md; other streaming services remain unverified. Netflix contractual authorization remains unverified.
 Older code versions remain older code even if their identifying examples are
 sanitized. The initially uploaded Web Store draft predates these additional
 repository hardening changes. See compliance-verification.md for the subsequent

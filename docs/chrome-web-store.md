@@ -49,7 +49,7 @@ Detailed description:
 > Roku, Netflix, or the other streaming services.
 >
 > A running relay and room token must be supplied by you or the publisher.
-> Privacy policy: https://sjiogg.github.io/roku-sync-privacy/
+> Privacy policy: https://github.com/SjioGG/roku-netflix-sync/blob/main/PRIVACY.md
 
 Keep the data-sharing paragraph visible in the listing before installation.
 Provide the public privacy-policy link in the dashboard's designated field.

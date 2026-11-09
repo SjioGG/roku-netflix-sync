@@ -102,3 +102,30 @@ The final 0.3.4 JavaScript checks and generated-policy check passed. A fresh
 real setup-tab capture was cropped to the extension form and padded to 1280 x 800 for the listing, preserving its
 visible contents. After Disable/Forget, client telemetry remained unchanged;
 the test relay was then stopped and the TV left paused.
+
+## Submitted for review
+
+On November 9, 2026, the Chrome Web Store accepted resubmission of version
+0.3.4. The dashboard showed “Afventer gennemgang” (Awaiting review). Unlisted
+distribution was verified and preserved. Automatic publication after approval
+remained selected in Google's submission dialog.
+
+The submitted ZIP was built from code revision `af3a3d6`, with the actual
+0.3.4 setup-tab screenshot, updated disclosure/storage justifications, public
+source/support links, and canonical public privacy-policy URL:
+https://github.com/SjioGG/roku-netflix-sync/blob/main/PRIVACY.md .
+Anonymous policy access was verified. The separate free Pages copy was also
+updated, and its build completed successfully.
+
+The saved reviewer field provides the public source/setup guide and a local
+loopback relay command using only a synthetic fixture token. It explicitly
+requires no Roku hardware or streaming login and covers the second Save in
+the persistent setup tab, two-tab playback, baton transfer, and disabling sync.
+No personal relay credentials or device addresses were provided to Google.
+
+Public release: https://github.com/SjioGG/roku-netflix-sync/releases/tag/v0.3.4
+with fresh `build.tar.gz` and extension ZIP assets. Older original releases
+remain in the private archive. The test relay was stopped, sync settings
+cleared, camera application closed, and the soundbar left paused. Store review
+is pending; acceptance, contractual authorization, frame accuracy, and other
+service/hardware combinations have not been established.
