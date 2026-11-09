@@ -16,39 +16,18 @@ Short description:
 
 Detailed description:
 
-> roku-sync synchronizes playback between Chrome tabs, or between Chrome and a
-> Roku through a relay you configure.
+> roku-sync synchronizes play, pause, and seeking between participating Chrome tabs. It can also send playback controls and title-launch requests to a Roku through a relay you configure.
 >
-> Setup is required. You need a running roku-sync relay and its room token. Roku
-> mode also requires a reachable Roku and, for a cloud relay, the home bridge
-> software. Browser-to-browser mode works without a Roku: participants open the
-> same video, and one tab controls play, pause, and seek while others follow.
+> Setup is required. Run the relay, enter its address and room token, accept the data-sharing disclosure, and enable sync. Device mode also requires a reachable Roku or a bridge running on its local network. Browser-to-browser mode needs no TV hardware.
 >
-> Use your streaming site's normal playback controls. The extension adds a
-> status badge and a popup for connection settings, mode selection, and turning
-> sync off. Automatic synchronization is experimental. Playback accuracy is not
-> guaranteed, exact Roku timestamp seeking is unsupported, and some titles or
-> players may need manual alignment.
+> Participants open the same video with matching playback versions. One tab controls playback while the others follow. Use the site's normal player controls, check the in-page status badge, and transfer control with the badge or popup baton button. Turn sync off in the popup at any time.
 >
-> Experimental integrations are included for Netflix, YouTube, Plex, Prime
-> Video, Disney+, Max, Apple TV, Hulu, and Twitch. Capabilities vary by service.
-> Netflix and YouTube have Roku title-launch requests. Other integrations may
-> open only the Roku app, requiring manual title selection. Roku-to-browser
-> playback handling and badge re-sync currently target Netflix watch pages.
+> Support varies by site and player. Some device integrations only open an app and require manual title selection. Automatic synchronization is experimental; playback accuracy is not guaranteed, exact Roku timestamp seeking is unsupported, and manual alignment may be needed.
 >
-> Before connecting, review and accept the data-sharing disclosure. While sync
-> is enabled, the extension sends the current service and media identifier,
-> playback position, play/pause and buffer state, timestamps, and a random
-> per-tab identifier to your relay. The relay operator and anyone with the room
-> token can access room state and control playback. Use a relay you trust.
-> Disable sync in the popup to stop further relay requests.
+> While enabled, the extension sends your current service and media identifier, playback position, play/pause and buffer state, timestamps, and a random per-tab identifier to your selected relay. The operator and anyone with the room token can access room state and control playback. Use a relay and room you trust. Disabling sync stops further relay requests.
 >
-> Each participant needs authorized access to the selected content. The
-> extension does not supply subscriptions, bypass access restrictions, or
-> distribute video. It is unofficial and is not affiliated with or endorsed by
-> Roku, Netflix, or the other streaming services.
+> Each participant needs authorized access to the content. The extension does not provide subscriptions, bypass access restrictions, or distribute video. It is unofficial and is not affiliated with device manufacturers or streaming providers.
 >
-> A running relay and room token must be supplied by you or the publisher.
 > Privacy policy: https://github.com/SjioGG/roku-netflix-sync/blob/main/PRIVACY.md
 
 Keep the data-sharing paragraph visible in the listing before installation.

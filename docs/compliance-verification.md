@@ -129,3 +129,21 @@ remain in the private archive. The test relay was stopped, sync settings
 cleared, camera application closed, and the soundbar left paused. Store review
 is pending; acceptance, contractual authorization, frame accuracy, and other
 service/hardware combinations have not been established.
+
+## Metadata correction after Yellow Argon
+
+Google subsequently rejected the description for keyword spam (Yellow Argon),
+identifying its streaming-service brand list. The public listing description
+was rewritten around actual playback controls, setup requirements, data sharing,
+and limitations. The brand catalogue and remaining third-party service names
+were removed from that description. This changes metadata only; the submitted
+0.3.4 package, permissions, policy, screenshot, and functionality were retained.
+No device connection or TV testing was needed for this correction.
+
+The developer dashboard confirmed the revised description was saved (1,684
+characters). Resubmission succeeded, and the item again showed
+“Afventer gennemgang” (Awaiting review). Existing unlisted distribution and
+automatic publication after approval were retained. This is a submission
+record, not a guarantee of approval.
+
+Reference: https://developer.chrome.com/docs/webstore/program-policies/listing-requirements
