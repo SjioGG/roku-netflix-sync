@@ -308,6 +308,33 @@ built-in, Continuity and virtual devices, and unplugging it falls back to
 `MacBook Pro Microphone`. It passes on a bare `python3` in `ubuntu-latest` with
 no `pip install`.
 
+## Install as a Mac app
+
+To install the native app using an existing local Electron runtime:
+
+```sh
+swift bin/render-app-icon.swift
+python3 bin/install-mac-app.py
+```
+
+Open **Roku Sync** from Applications or Spotlight, then keep it in the Dock if
+you want. No Terminal or npm is needed for normal use. The app contains its
+UI and Python scripts and uses the Mac's existing Python and audio tools.
+It opens with ANC and the Roku bridge stopped; start the feature you need.
+
+The installer keeps existing desktop settings and stores machine-local runtime
+paths and an initial private settings copy in
+`~/Library/Application Support/Roku Sync/`, outside the signed app. Neither
+private settings nor credentials are embedded in the app bundle. Reinstalling
+preserves settings and keeps a recoverable previous app in ignored `dist/mac/`.
+To update the installed desktop app after source changes, rerun the installer.
+The desktop app does not currently update itself from the Chrome Web Store.
+
+The installer follows Electron's documented prebuilt-binary packaging method:
+https://www.electronjs.org/docs/latest/tutorial/application-distribution .
+It reuses the existing official runtime and signs the locally built bundle
+ad hoc; it does not download packages or notarize a public distribution.
+
 ## Desktop control center ([BEE-232](https://linear.app/beeros/issue/BEE-232))
 
 `desktop/` is an Electron wrapper that runs both halves of the system from one

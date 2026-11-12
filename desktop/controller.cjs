@@ -207,7 +207,7 @@ class DesktopController extends EventEmitter {
     return {
       command: this.pythonPath,
       args: [path.join(this.rootDir, script)].concat(args),
-      env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1' }, extraEnv || {}),
+      env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }, extraEnv || {}),
     }
   }
 

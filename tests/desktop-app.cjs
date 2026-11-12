@@ -1164,10 +1164,10 @@ async function main() {
   await test('package.json declares the pinned Electron wrapper', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'desktop', 'package.json'), 'utf8'))
     assert.equal(pkg.name, 'roku-sync-desktop')
-    assert.equal(pkg.version, '0.3.2')
+    assert.equal(pkg.version, '0.4.0')
     assert.equal(pkg.main, 'main.js')
     assert.equal(pkg.scripts.start, 'electron .')
-    assert.ok(/^\^35\./.test(pkg.devDependencies.electron), pkg.devDependencies.electron)
+    assert.equal(pkg.devDependencies.electron, '40.4.1')
   })
 
   await test('every desktop file exists and the launcher is executable', () => {

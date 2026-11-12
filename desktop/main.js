@@ -8,9 +8,18 @@
  */
 
 const path = require('node:path')
-require('./local-env.cjs').loadLocalEnv()
 const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron')
+app.setName('Roku Sync')
+require('./runtime.cjs').configureRuntime({ packaged: app.isPackaged, userData: app.getPath('userData') })
 const { DesktopController } = require('./controller.cjs')
+
+// Opening the Dock icon again should focus the existing control center.
+const hasInstanceLock = app.requestSingleInstanceLock()
+if (!hasInstanceLock) app.quit()
+app.on('second-instance', () => {
+  if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus() }
+  else if (app.isReady()) createWindow()
+})
 
 let controller = null
 let window = null
@@ -119,11 +128,12 @@ function registerIpc() {
 }
 
 app.whenReady().then(() => {
+  if (!hasInstanceLock) return
   controller = new DesktopController({ rootDir: path.join(__dirname, '..') })
   attach(controller)
   registerIpc()
   // Discovery and the ping tester run on startup so the window opens with data.
-  controller.scanRokuDevices().catch(() => {})
+  if (process.env.ROKU_SYNC_DESKTOP_SMOKE !== '1') controller.scanRokuDevices().catch(() => {})
 
   createWindow()
   app.on('activate', () => {

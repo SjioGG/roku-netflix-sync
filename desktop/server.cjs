@@ -19,6 +19,7 @@ const DEFAULT_PORT = 8767
 const DEFAULT_HOST = '127.0.0.1'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const STATIC_FILES = {
+  '/assets/app-icon.png': { file: 'assets/app-icon.png', type: 'image/png' },
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/renderer.js': { file: 'renderer.js', type: 'text/javascript; charset=utf-8' },
