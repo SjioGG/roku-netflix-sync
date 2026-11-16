@@ -1,12 +1,16 @@
 # roku-sync privacy policy
 
-Effective November 9, 2026. This policy covers the roku-sync Chrome extension and its bundled reference sync relay. The separate desktop microphone/AEC companion has different functionality and is not part of the extension.
+Effective November 16, 2026. This policy covers the roku-sync Chrome extension and its bundled reference sync relay. The separate desktop microphone/AEC companion has different functionality and is not part of the extension.
 
 ## What the extension handles
 
 The extension stores your chosen relay URL, room token, sync mode, enable setting, timing trim, and data-sharing consent locally in your Chrome profile using Chrome local storage, not Chrome Sync. During setup, the draft settings are held temporarily in extension-only session storage while setup moves from the popup into a tab. That draft is removed when the setup tab reads it, when you choose Forget relay settings, or when the browser session ends. A room token is a shared credential that authorizes access to room data and playback controls. The extension does not request your streaming-service password or send streaming-service login cookies to the relay.
 
 After you give consent and enable sync, the extension reads playback information on the streaming sites listed in its installation permissions. It sends the streaming service name, a media identifier derived from the playback URL, playback position, play/pause and buffer readiness state, timestamps, playback commands, and a random per-tab identifier to your configured relay. Playback updates are sent approximately every 750 milliseconds while a recognized video is present. The media identifier can reveal what you are watching, even though full browsing URLs and unrelated browsing history are not sent. Some identifiers, such as Plex keys and experimental URL-derived IDs, may describe local or private media.
+
+**Create room** sends one request without a token to your configured relay, which returns a new room token; the relay sees your IP address and applies a creation limit per address. The room creator is also stored locally as a one-time flag so their tab starts in control.
+
+**Connect Roku Sync app** is optional and only for a Mac running the separate desktop companion. If you grant access to `http://127.0.0.1`, a muted TV reference tab (opened by that app with `#roku-sync-ref`) exchanges the same playback information with the app on your own computer at `127.0.0.1:8767`. This stays on your computer and is not sent to the relay by that connection.
 
 The relay receives the room token in an authorization header and sees connection information such as your IP address. The extension does not record or upload audio, microphone input, video frames, or the video stream. It has no advertising or analytics SDK.
 

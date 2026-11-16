@@ -18,13 +18,13 @@ Detailed description:
 
 > roku-sync synchronizes play, pause, and seeking between participating Chrome tabs. It can also send playback controls and title-launch requests to a Roku through a relay you configure.
 >
-> Setup is required. Run the relay, enter its address and room token, accept the data-sharing disclosure, and enable sync. Device mode also requires a reachable Roku or a bridge running on its local network. Browser-to-browser mode needs no TV hardware.
+> Setup is required. Enter the address of a relay you trust, accept the data-sharing disclosure, then create a room or paste an invite from someone else, and turn sync on. Device mode also requires a reachable Roku or a bridge running on its local network. Browser-to-browser mode needs no TV hardware.
 >
-> Participants open the same video with matching playback versions. One tab controls playback while the others follow. Use the site's normal player controls, check the in-page status badge, and transfer control with the badge or popup baton button. Turn sync off in the popup at any time.
+> Participants open the same video with matching playback versions. One person controls playback while the others follow; the person who created the room starts in control. Anyone can take control, and the person in control can hand it over, from the popup or the in-page badge. Turn sync off in the popup at any time.
 >
 > Support varies by site and player. Some device integrations only open an app and require manual title selection. Automatic synchronization is experimental; playback accuracy is not guaranteed, exact Roku timestamp seeking is unsupported, and manual alignment may be needed.
 >
-> While enabled, the extension sends your current service and media identifier, playback position, play/pause and buffer state, timestamps, and a random per-tab identifier to your selected relay. The operator and anyone with the room token can access room state and control playback. Use a relay and room you trust. Disabling sync stops further relay requests.
+> While enabled, the extension sends your current service and media identifier, playback position, play/pause and buffer state, timestamps, and a random per-tab identifier to your selected relay. The operator and anyone with the room token or invite link can access room state and control playback. Use a relay and room you trust. Disabling sync stops further relay requests.
 >
 > Each participant needs authorized access to the content. The extension does not provide subscriptions, bypass access restrictions, or distribute video. It is unofficial and is not affiliated with device manufacturers or streaming providers.
 >
@@ -48,7 +48,7 @@ Permission justifications:
 | --- | --- |
 | `storage` | Save the relay address, room token, sync mode, enable setting, explicit data-sharing consent, and optional timing trim locally so the user can reconnect without entering them each time. |
 | Streaming-site content scripts | Detect the selected media and playback state, display the sync badge, and apply play/pause/seek synchronization on the listed services. Site matches cover single-page navigation between titles. No access to unrelated browsing sites is requested for content scripts. Netflix's packaged page-world bridge accesses its player for seeking. |
-| Optional HTTPS relay hosts and loopback HTTP relay hosts | Connect to the relay selected by the user to exchange authenticated playback state and commands. Request access for the chosen host during setup, rather than granting access to every HTTPS host at installation. HTTP is allowed only for loopback relays. |
+| Optional HTTPS relay hosts and loopback HTTP relay hosts | Connect to the relay selected by the user to create rooms and exchange authenticated playback state and commands. Request access for the chosen host during setup, rather than granting access to every HTTPS host at installation. HTTP is allowed only for loopback hosts: a locally run relay, or, after the user clicks Connect Roku Sync app, the optional desktop companion on the same computer. |
 
 Use the dashboard's current category definitions. The implementation handles
 user data even when the relay is self-hosted. Disclose at least these categories
@@ -110,10 +110,10 @@ Use a temporary review environment or run the supplied local relay. Do not
 publish a real room token, personal playback history, or private device address.
 
 1. Clone `https://github.com/SjioGG/roku-netflix-sync` (requires public visibility or separately provided access), enter its directory, and run `SYNC_HOST=127.0.0.1 SYNC_TOKEN='review-fixture-only' ROKU_BRIDGE_ONLY=1 python3 sync_server.py` with Python 3. The example token is only for an isolated local test; do not expose this relay publicly.
-2. Install the submitted extension. Open its popup, use relay URL `http://127.0.0.1:8766` and token `review-fixture-only`, and choose **Browser-to-Browser (Master/Slave, No Roku)**.
-3. Read the disclosure, explicitly accept data sharing, enable sync, and Save. Setup opens in a normal tab with your draft settings. Save in that tab and approve Chrome's request for access to the chosen relay host if shown. The tab must show Saved before testing.
+2. Install the submitted extension and open its popup. The relay under Settings defaults to `http://127.0.0.1:8766`.
+3. Read the disclosure and tick the agreement, then click **Create room**. The first time, setup continues in a normal tab with the new room filled in: click **Save** there and approve Chrome's request for access to `127.0.0.1`. The status line must say "Saved". (Alternatively enter token `review-fixture-only` under Settings, choose **Browser to browser**, and Save.)
 4. Open the same playable YouTube video in two tabs and interact with each player once to allow playback. Use content the reviewer is authorized to access, with matching playback versions; do not use a login, paid title, or geo-restricted video as the only review path. Reload the tabs after setup if needed.
-5. Check the badge to identify the master and follower. Play, pause, and seek using the master's normal video controls. The follower should reflect the changes. Click the badge or popup baton button to transfer control.
+5. Check the badge to identify the master and follower. Play, pause, and seek using the master's normal video controls. The follower should reflect the changes. With a tab active, the popup shows **Take control** or **Hand over control**; it or a badge click transfers control. **Copy invite** copies a link another browser can paste under **Got an invite?**.
 6. Disable sync in the popup. Confirm subsequent playback stays local and relay polling stops. Re-enable to reconnect.
 
 Roku mode is an additional path and requires real hardware. Configure a
@@ -131,7 +131,7 @@ screenshots, developer dashboards, desktop ANC controls, or unrelated video
 artwork as demonstrations of extension functionality.
 
 - Capture the real popup showing relay setup, the data-sharing notice, sync mode, and enable control. Keep the token masked and use a local or public example relay rather than personal infrastructure details.
-- A clean, unconfigured setup-tab capture for version 0.3.4 is included at [screenshots/popup-0.3.4.png](screenshots/popup-0.3.4.png). It shows setup only, not evidence of working Roku or peer synchronization. Do not reuse the old blank-block `dist/cws-screenshot-1280x800.png`.
+- A clean, unconfigured setup-tab capture for version 0.3.5 is included at [screenshots/popup-0.3.5.png](screenshots/popup-0.3.5.png); the 0.3.4 capture is kept for history at [screenshots/popup-0.3.4.png](screenshots/popup-0.3.4.png). It shows setup only, not evidence of working Roku or peer synchronization. Do not reuse the old blank-block `dist/cws-screenshot-1280x800.png`.
 - Capture the real in-page badge during a successful browser-to-browser session, including the streaming player controls needed to understand the feature. Prefer content you own or have permission to reproduce, and exclude account names and personal recommendations.
 - If showing Roku synchronization, use an authentic demonstration of the feature and describe the hardware/setup requirement. Do not label a browser-only screenshot as proof of Roku synchronization.
 - Replace every rejected screenshot and inspect the title, short/detailed description, category, icons, and promotional media for the same mismatch.
