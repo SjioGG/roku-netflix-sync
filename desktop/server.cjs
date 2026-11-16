@@ -18,6 +18,20 @@ const { DesktopController } = require('./controller.cjs')
 const DEFAULT_PORT = 8767
 const DEFAULT_HOST = '127.0.0.1'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+const STREAMING_ORIGIN_RE = /^https:\/\/([^/]+\.)?(netflix\.com|youtube\.com|plex\.tv|plex\.direct|primevideo\.com|disneyplus\.com|max\.com|apple\.com|hulu\.com|twitch\.tv)$/i
+
+function localMirrorCorsHeaders(originHeader) {
+  const headers = {
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Private-Network': 'true',
+  }
+  if (originHeader && (STREAMING_ORIGIN_RE.test(originHeader) || originHeader.startsWith('chrome-extension://'))) {
+    headers['Access-Control-Allow-Origin'] = originHeader
+    headers.Vary = 'Origin'
+  }
+  return headers
+}
 const STATIC_FILES = {
   '/assets/app-icon.png': { file: 'assets/app-icon.png', type: 'image/png' },
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
@@ -56,14 +70,14 @@ function readBody(request) {
   })
 }
 
-function sendJson(response, status, payload) {
+function sendJson(response, status, payload, extraHeaders = null) {
   const body = JSON.stringify(payload)
-  response.writeHead(status, {
+  response.writeHead(status, Object.assign({
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
-  })
+  }, extraHeaders || {}))
   response.end(body)
 }
 
@@ -96,6 +110,7 @@ function createServer(options = {}) {
       await controller.refreshDevices()
       return controller.snapshot()
     },
+    'POST /api/devices/rescan': async () => controller.rescanAll(),
     'POST /api/anc/start': () => Object.assign(controller.startAnc(),
       { snapshot: controller.snapshot() }),
     'POST /api/anc/stop': async () => {
@@ -106,6 +121,19 @@ function createServer(options = {}) {
       await controller.runSelfTest()
       return controller.snapshot()
     },
+    'POST /api/anc/preview/start': (body) => Object.assign(
+      controller.startMicPreview((body && body.options) || body || {}),
+      { snapshot: controller.snapshot() },
+    ),
+    'POST /api/anc/preview/stop': async () => {
+      await controller.stopMicPreview()
+      return controller.snapshot()
+    },
+    'GET /api/anc/preview/audio': () => controller.getMicPreviewAudio(),
+    'GET /api/local-mirror': () => controller.getLocalMirrorState(),
+    'POST /api/local-mirror/heartbeat': (body) => controller.recordLocalMirrorHeartbeat(body || {}),
+    'POST /api/mirror/reference-chrome': () => controller.openReferenceChrome(),
+    'POST /api/mirror/launch': (body) => controller.launchMirrorUrl(body && body.url, body || {}),
     'POST /api/bridge/start': () => Object.assign(controller.startRokuBridge(),
       { snapshot: controller.snapshot() }),
     'POST /api/bridge/stop': async () => {
@@ -131,21 +159,38 @@ function createServer(options = {}) {
       }
       const url = new URL(request.url || '/', origin)
       const key = `${request.method} ${url.pathname}`
+      const isLocalMirrorRoute = url.pathname === '/api/local-mirror' || url.pathname === '/api/local-mirror/heartbeat'
+      const mirrorCors = isLocalMirrorRoute ? localMirrorCorsHeaders(request.headers.origin) : null
+      if (isLocalMirrorRoute && request.method === 'OPTIONS') {
+        response.writeHead(204, mirrorCors)
+        response.end()
+        return
+      }
       if (url.pathname.startsWith('/api/')) {
-        const site = request.headers['sec-fetch-site']
-        if ((site && site !== 'same-origin' && site !== 'none') ||
-            (request.headers.origin && request.headers.origin !== origin.origin)) {
-          sendJson(response, 403, { error: 'same-origin requests required' })
-          return
+        if (isLocalMirrorRoute) {
+          const reqOrigin = request.headers.origin
+          if (reqOrigin && reqOrigin !== origin.origin
+              && !STREAMING_ORIGIN_RE.test(reqOrigin)
+              && !reqOrigin.startsWith('chrome-extension://')) {
+            sendJson(response, 403, { error: 'streaming or extension origin required' })
+            return
+          }
+        } else {
+          const site = request.headers['sec-fetch-site']
+          if ((site && site !== 'same-origin' && site !== 'none') ||
+              (request.headers.origin && request.headers.origin !== origin.origin)) {
+            sendJson(response, 403, { error: 'same-origin requests required' })
+            return
+          }
         }
         if (request.method === 'POST' && (request.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json') {
-          sendJson(response, 415, { error: 'application/json required' })
+          sendJson(response, 415, { error: 'application/json required' }, mirrorCors)
           return
         }
       }
       if (routes[key]) {
         const body = request.method === 'POST' ? await readBody(request) : {}
-        sendJson(response, 200, await routes[key](body))
+        sendJson(response, 200, await routes[key](body), mirrorCors)
         return
       }
       const asset = STATIC_FILES[url.pathname]

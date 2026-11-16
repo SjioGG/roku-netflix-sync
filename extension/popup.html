@@ -35,6 +35,7 @@
 <label>Relay URL<input id="server" type="url" placeholder="https://your-relay.example" autocomplete="off"><small>Requires a running relay. Chrome will ask for access to this host when you Save.</small></label>
 <label>Room token<input id="token" type="password" autocomplete="off"></label>
 <details><summary>Timing adjustment (optional)</summary><label>Additional player trim (ms)<input id="rokuLeadMs" type="number" min="-1000" max="1000" step="1" value="0"><small>Optional adjustment for player resume speed. Timing compensation is an estimate.</small></label></details>
+<button id="connectApp" type="button">Connect Roku Sync app</button><small id="connectAppStatus">Lets the silent TV reference tab talk to Roku Sync.app on this Mac (127.0.0.1 only).</small>
 <button id="save" type="button">Save</button> <button id="forget" type="button">Forget relay settings</button>
 <p id="status" role="status"></p>
 <small>Save opens setup in a tab. Save there to approve relay access and finish connecting.</small>

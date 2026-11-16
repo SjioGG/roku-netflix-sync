@@ -26,6 +26,7 @@ Environment::
 (SSDP + arp + seeds) for Rokus and prints the AirPlay-style device list instead
 of running the bridge loop.
 """
+import errno
 import json
 import os
 import re
@@ -46,6 +47,8 @@ if __name__ == '__main__':
 DEFAULT_SERVER_URL = 'http://127.0.0.1:8766'
 DEFAULT_ROKU_URL = 'http://192.168.1.100:8060'
 DEFAULT_POLL_MS = 300
+USER_AGENT = 'RokuSync/0.4'
+LOCAL_NETWORK_DENIED_ERRNOS = frozenset({errno.EHOSTUNREACH, errno.EPERM, errno.EACCES})
 # LAN discovery: one short SSDP window and one probe round trip per candidate.
 DISCOVER_TIMEOUT_S = 1.2
 SSDP_TIMEOUT_S = 0.8
@@ -89,7 +92,7 @@ class NoRelayRedirects(urllib.request.HTTPRedirectHandler):
 
 def http(url, data=None, method=None, timeout=5, token=None, content_type=None):
     """Open ``url`` and return the response body as bytes."""
-    headers = {}
+    headers = {'User-Agent': USER_AGENT}
     if token is not None:
         validate_relay_url(url)
     if token:
@@ -97,7 +100,11 @@ def http(url, data=None, method=None, timeout=5, token=None, content_type=None):
     if content_type:
         headers['Content-Type'] = content_type
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
-    transport = urllib.request.build_opener(NoRelayRedirects()).open if token is not None else urllib.request.urlopen
+    # ECP is a direct LAN connection. System/corporate proxies must not receive
+    # Roku discovery and control requests. Relay requests retain proxy support.
+    transport = urllib.request.build_opener(
+        NoRelayRedirects() if token is not None else urllib.request.ProxyHandler({})
+    ).open
     with transport(request, timeout=timeout) as response:
         return response.read()
 
@@ -168,12 +175,40 @@ def parse_device_info(xml_bytes, base_url, latency_ms=None, active_app=None):
     }
 
 
-def ssdp_candidates(timeout=SSDP_TIMEOUT_S):
+def _os_errno(exc):
+    """Extract an OS errno from ``OSError`` or ``urllib.error.URLError``."""
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, OSError):
+        return exc.reason.errno
+    if isinstance(exc, OSError):
+        return exc.errno
+    return None
+
+
+def _primary_lan_ip():
+    """Best-effort private LAN IPv4 address so multicast avoids VPN tunnels."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(('192.168.1.1', 8060))
+        ip = probe.getsockname()[0]
+        return ip if PRIVATE_IP.match(ip) else None
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
+def ssdp_candidates(timeout=SSDP_TIMEOUT_S, denied_errors=None):
     """Ask the LAN for Roku ECP providers and return their base URLs."""
     found = []
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        lan_ip = _primary_lan_ip()
+        if lan_ip:
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(lan_ip))
+            except OSError:
+                pass
         sock.settimeout(max(0.05, min(timeout, SSDP_TIMEOUT_S)))
         sock.sendto(SSDP_SEARCH.encode(), SSDP_ADDRESS)
         while True:
@@ -189,7 +224,9 @@ def ssdp_candidates(timeout=SSDP_TIMEOUT_S):
             if parsed.scheme not in ('http', 'https') or not parsed.netloc:
                 continue
             found.append('http://%s' % parsed.netloc)
-    except OSError:
+    except OSError as exc:
+        if denied_errors is not None and _os_errno(exc) in LOCAL_NETWORK_DENIED_ERRNOS:
+            denied_errors.append(_os_errno(exc))
         return []
     finally:
         sock.close()
@@ -197,10 +234,10 @@ def ssdp_candidates(timeout=SSDP_TIMEOUT_S):
 
 
 def arp_candidates(runner=None):
-    """Parse ``arp -a`` for plausible LAN hosts to probe for ECP."""
+    """Parse ``arp -an`` for plausible LAN hosts to probe for ECP."""
     runner = runner or subprocess.run
     try:
-        output = runner(['arp', '-a'], capture_output=True, text=True, timeout=3).stdout or ''
+        output = runner(['arp', '-an'], capture_output=True, text=True, timeout=3).stdout or ''
     except (OSError, subprocess.SubprocessError):
         return []
     found = []
@@ -213,13 +250,20 @@ def arp_candidates(runner=None):
     return found
 
 
-def _probe_url(base_url, timeout):
+def _probe_url(base_url, timeout, errors=None):
     """Probe one candidate for ECP; return parsed metadata or ``None``."""
     root = base_url.rstrip('/')
     started = time.monotonic()
     try:
         raw = http(root + '/query/device-info', timeout=timeout)
-    except (OSError, urllib.error.URLError, ValueError):
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        if errors is not None:
+            elapsed = time.monotonic() - started
+            code = _os_errno(exc)
+            is_timeout = isinstance(exc, socket.timeout) or (
+                isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, socket.timeout))
+            if not is_timeout and code is not None:
+                errors.append((code, elapsed))
         return None
     latency_ms = round((time.monotonic() - started) * 1000)
     active_app = None
@@ -240,11 +284,13 @@ def discover_roku_devices(seed_urls=None, timeout=DISCOVER_TIMEOUT_S, include_ar
 
     Candidates come from explicit seeds, ``ROKU_URL``, SSDP and the ARP table,
     and every candidate is probed concurrently so a scan costs one short round
-    trip rather than one per address. Returns ``{'devices': [...], 'scanned_candidates': n}``
+    trip rather than one per address. Returns
+    ``{'devices': [...], 'scanned_candidates': n, 'local_network_blocked': bool}``
     with the configured ``ROKU_URL`` first and the rest ordered by latency.
     """
     configured = (os.environ.get('ROKU_URL') or DEFAULT_ROKU_URL).strip()
     candidates = []
+    ssdp_denied = []
 
     def add(url):
         if not url:
@@ -265,38 +311,54 @@ def discover_roku_devices(seed_urls=None, timeout=DISCOVER_TIMEOUT_S, include_ar
     for url in seed_urls or []:
         add(url)
     if include_ssdp:
-        for url in ssdp_candidates(timeout=min(timeout, SSDP_TIMEOUT_S)):
+        for url in ssdp_candidates(timeout=min(timeout, SSDP_TIMEOUT_S), denied_errors=ssdp_denied):
             add(url)
     if include_arp:
         for url in arp_candidates():
             add(url)
 
     found = {}
+    probe_errors = []
     lock = threading.Lock()
     probe_timeout = max(0.2, min(timeout, DISCOVER_TIMEOUT_S))
 
     def probe(url):
-        device = _probe_url(url, probe_timeout)
-        if not device:
-            return
+        local_errors = []
+        device = _probe_url(url, probe_timeout, errors=local_errors)
         with lock:
-            found[url] = device
+            if device:
+                found[url] = device
+            if local_errors:
+                probe_errors.extend(local_errors)
 
     threads = [threading.Thread(target=probe, args=(url,), daemon=True) for url in candidates]
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + probe_timeout + 0.25
+    # Each worker can make two requests: device-info followed by active-app.
+    deadline = time.monotonic() + 2 * probe_timeout + 0.25
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
 
     with lock:
         devices = list(found.values())
+        recorded_errors = list(probe_errors)
     devices.sort(key=lambda device: (
         0 if device['url'] == configured else 1,
         device.get('latency_ms') if device.get('latency_ms') is not None else 9999,
         device['name'],
     ))
-    return {'devices': devices, 'scanned_candidates': len(candidates)}
+    denied_probes = [code for code, elapsed in recorded_errors
+                     if code in LOCAL_NETWORK_DENIED_ERRNOS and elapsed < 0.25]
+    normal_lan_replies = [code for code, _elapsed in recorded_errors
+                          if code not in LOCAL_NETWORK_DENIED_ERRNOS]
+    local_network_blocked = bool(
+        not devices and (ssdp_denied or (denied_probes and not normal_lan_replies))
+    )
+    return {
+        'devices': devices,
+        'scanned_candidates': len(candidates),
+        'local_network_blocked': local_network_blocked,
+    }
 
 
 def read_state(roku_url):
@@ -464,6 +526,9 @@ def run_forever(server_url=None, token=None, roku_url=None, poll_ms=None):
 
 
 if __name__ == '__main__':
+    if '--check-runtime' in sys.argv:
+        print(json.dumps({'ok': True, 'python': sys.executable}))
+        sys.exit(0)
     if '--discover' in sys.argv:
         seeds = []
         for index, argument in enumerate(sys.argv):

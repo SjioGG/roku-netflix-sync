@@ -87,6 +87,20 @@ document.querySelector('#save').onclick=async()=>{
     status.textContent=enabled.checked?'Saved. Reload streaming tabs if you changed the relay or room token.':'Saved. Tick Enable Roku sync when ready.';
   } catch(error) {status.textContent=error.message;}
 };
+const connectStatus=document.querySelector('#connectAppStatus');
+const APP_ORIGINS=['http://127.0.0.1/*'];
+chrome.permissions?.contains?.({origins:APP_ORIGINS})?.then?.(has=>{if(has) connectStatus.textContent='Connected: reference tabs reach Roku Sync.app on this Mac.';}).catch(()=>{});
+document.querySelector('#connectApp').onclick=async()=>{
+  try {
+    if(!settingsTab) {
+      // Chrome closes the action popup for the permission prompt.
+      await chrome.tabs.create({url:chrome.runtime.getURL('popup.html')+'#connect-app'});
+      return;
+    }
+    const granted=await chrome.permissions.request({origins:APP_ORIGINS});
+    connectStatus.textContent=granted?'Connected: reload the TV reference tab.':'Not connected. Reference tabs will ask for local network access instead.';
+  } catch(error) {connectStatus.textContent=error.message;}
+};
 document.querySelector('#forget').onclick=async()=>{
   await chrome.storage.session.remove('relaySetupDraft');
   await chrome.storage.local.set({enabled:false,privacyConsent:null,server:null,token:null,rokuLeadMs:0,syncMode:'roku'});

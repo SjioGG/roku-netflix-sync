@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 function setup(initial={}, inTab=true, session={}) {
-  const ids=['server','token','status','rokuLeadMs','enabled','syncMode','baton','consent','save','forget'];
+  const ids=['server','token','status','rokuLeadMs','enabled','syncMode','baton','consent','save','forget','connectApp','connectAppStatus'];
   const elements=Object.fromEntries(ids.map(id=>[id,{value:'',checked:false,textContent:''}]));
   const storage={...initial},writes=[],permissions=[],drafts={...session},opened=[];
   let granted=true;

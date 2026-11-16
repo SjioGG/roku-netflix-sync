@@ -828,6 +828,17 @@ class RelayTest(unittest.TestCase):
         self.assertIn('aec_daemon.py',bundle)
         self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(workflow),'..','..','aec_daemon.py')))
 
+    def test_reference_follower_telemetry_does_not_steal_master_baton(self):
+        with self.request('/telemetry',{'client_id':'ref-macbook-1','title_id':'aqz-KE-bpKQ','app':'youtube','position_ms':1000,'paused':True,'ready_state':3,'sync_mode':'peer'}):
+            pass
+        with relay.lock:
+            self.assertIsNone(relay.shared['master_client_id'])
+        with self.request('/telemetry',{'client_id':'japan-1','title_id':'aqz-KE-bpKQ','app':'youtube','position_ms':25000,'paused':False,'ready_state':4,'sync_mode':'peer'}):
+            pass
+        with relay.lock:
+            self.assertEqual(relay.shared['master_client_id'],'japan-1')
+            self.assertEqual(relay.shared['master_state']['position_ms'],25000)
+
 
 # Deliberately synthetic device identifiers and Wi-Fi names. Do not paste live device responses here.
 DEVICE_INFO_XML = b'''<?xml version="1.0" encoding="UTF-8" ?>
@@ -1009,6 +1020,7 @@ class RokuDiscoveryTest(unittest.TestCase):
 
         self.assertEqual(self.client.arp_candidates(runner=boom), [])
 
+    @unittest.skipIf(os.environ.get('ROKU_SYNC_TEST_OFFLINE') == '1', 'CLI performs real LAN discovery')
     def test_discover_cli_prints_json_and_exits_zero(self):
         import subprocess
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'roku_client.py')
@@ -1022,6 +1034,7 @@ class RokuDiscoveryTest(unittest.TestCase):
         self.assertIn('scanned_candidates', payload)
         self.assertIsInstance(payload['devices'], list)
 
+    @unittest.skipIf(os.environ.get('ROKU_SYNC_TEST_OFFLINE') == '1', 'CLI performs real LAN discovery')
     def test_discover_cli_prints_human_readable_lines(self):
         import subprocess
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'roku_client.py')

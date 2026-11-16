@@ -297,6 +297,11 @@ async function main() {
   })
 
   await test('startAnc spawns the daemon and explains a missing sounddevice', async () => {
+    // Offline repair checks must not open a real microphone or output stream.
+    if (process.env.ROKU_SYNC_TEST_OFFLINE === '1') {
+      console.log('  skip real audio startup (offline mode; mocked startup is covered separately)')
+      return
+    }
     const { dir, file } = tempConfigPath()
     const controller = freshController(file)
     const lines = []
@@ -337,7 +342,7 @@ async function main() {
       child.stderr = new PassThrough()
       child.kill = (signal) => {
         killed.push(signal)
-        setTimeout(() => child.emit('exit', 0, signal), 10)
+        setTimeout(() => { child.emit('exit', 0, signal); child.emit('close', 0, signal) }, 10)
         return true
       }
       setTimeout(() => {
@@ -407,7 +412,7 @@ async function main() {
       child.stderr = new PassThrough()
       child.kill = (signal) => {
         killed.push(signal)
-        setTimeout(() => child.emit('exit', 0, signal), 10)
+        setTimeout(() => { child.emit('exit', 0, signal); child.emit('close', 0, signal) }, 10)
         return true
       }
       // The bridge must receive the saved relay settings in its environment.
@@ -453,7 +458,7 @@ async function main() {
       child.stdout = null
       child.stderr = null
       child.kill = () => true
-      setTimeout(() => child.emit('exit', 3, null), 20)
+      setTimeout(() => { child.emit('exit', 3, null); child.emit('close', 3, null) }, 20)
       return child
     }
     const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn })
@@ -507,6 +512,117 @@ async function main() {
       assert.equal(controller.anc.mic_device, 'Focusrite Scarlett 2i2 USB')
       assert.equal(controller.snapshot().anc.delay_ms, 183.4)
     } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('startMicPreview records standalone WAV clips and serves base64 playback audio', async () => {
+    const { dir, file } = tempConfigPath()
+    const { PassThrough } = require('node:stream')
+    const { EventEmitter } = require('node:events')
+    const fakeSpawn = (_command, args) => {
+      const child = new EventEmitter()
+      child.pid = 7171
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.kill = () => true
+      const cleanIdx = args.indexOf('--preview-clean-wav')
+      const rawIdx = args.indexOf('--preview-raw-wav')
+      const idIdx = args.indexOf('--preview-id')
+      const clipId = args[idIdx + 1]
+      setTimeout(() => {
+        fs.writeFileSync(args[cleanIdx + 1], Buffer.from('RIFFcleanWAVE'))
+        fs.writeFileSync(args[rawIdx + 1], Buffer.from('RIFFrawWAVE'))
+        child.stdout.write(JSON.stringify({ event: 'preview_start', id: clipId, total_ms: 5000 }) + '\n')
+        child.stdout.write(JSON.stringify({ event: 'preview_progress', id: clipId, elapsed_ms: 2500, total_ms: 5000, mic_rms_db: -18.5 }) + '\n')
+        child.stdout.write(JSON.stringify({
+          event: 'preview_done', id: clipId, duration_ms: 5000,
+          mic_rms_db: -19.2, mic_peak_db: -7.4, clean_rms_db: -24.0, clean_peak_db: -8.1,
+          suppression_db: 18.6, erle_db: 21.3, delay_ms: 175.0, confidence: 0.88,
+        }) + '\n')
+        setTimeout(() => child.emit('close', 0), 10)
+      }, 15)
+      return child
+    }
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn })
+    let previewDir = null
+    try {
+      const started = controller.startMicPreview({ seconds: 5 })
+      previewDir = controller._previewDir
+      assert.equal(started.started, true)
+      assert.equal(started.mode, 'standalone')
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      const snap = controller.snapshot()
+      assert.equal(snap.micPreview.running, false)
+      assert.equal(snap.micPreview.phase, 'ready')
+      assert.equal(snap.micPreview.result.suppression_db, 18.6)
+      const audio = controller.getMicPreviewAudio()
+      assert.equal(audio.clipId, started.clipId)
+      assert.ok(audio.cleanDataUrl.startsWith('data:audio/wav;base64,'))
+      assert.ok(audio.rawDataUrl.startsWith('data:audio/wav;base64,'))
+    } finally {
+      await controller.dispose()
+      if (previewDir) assert.equal(fs.existsSync(previewDir), false, 'dispose must clean up preview WAV temp dir')
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('startMicPreview tees off a live running ANC daemon over stdin without restarting it', async () => {
+    const { dir, file } = tempConfigPath()
+    const { PassThrough } = require('node:stream')
+    const { EventEmitter } = require('node:events')
+    const stdinCommands = []
+    let spawnCount = 0
+    const fakeSpawn = () => {
+      spawnCount += 1
+      const child = new EventEmitter()
+      child.pid = 7272
+      child.stdin = new PassThrough()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.stdin.on('data', (chunk) => {
+        for (const line of chunk.toString('utf8').split('\n').filter(Boolean)) {
+          const cmd = JSON.parse(line)
+          stdinCommands.push(cmd)
+          if (cmd.cmd === 'preview') {
+            fs.writeFileSync(cmd.clean_wav, Buffer.from('RIFFliveclean'))
+            fs.writeFileSync(cmd.raw_wav, Buffer.from('RIFFliveraw'))
+            child.stdout.write(JSON.stringify({ event: 'preview_start', id: cmd.id, total_ms: 3000 }) + '\n')
+          } else if (cmd.cmd === 'preview_stop') {
+            const prev = stdinCommands.find((c) => c.cmd === 'preview')
+            child.stdout.write(JSON.stringify({
+              event: 'preview_done', id: prev.id, duration_ms: 1400,
+              mic_peak_db: -11.0, suppression_db: 22.4, delay_ms: 182.0,
+            }) + '\n')
+          }
+        }
+      })
+      child.kill = (signal) => {
+        setTimeout(() => { child.emit('exit', 0, signal); child.emit('close', 0, signal) }, 5)
+        return true
+      }
+      setTimeout(() => {
+        child.stdout.write(JSON.stringify({ event: 'start', mic_device: 'MacBook Pro Microphone',
+          ref_device: 'BlackHole 2ch', out_device: 'ZoomAudioDevice', notes: [] }) + '\n')
+      }, 10)
+      return child
+    }
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn })
+    try {
+      controller.startAnc()
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      assert.equal(controller.anc.state, 'running')
+      const started = controller.startMicPreview({ seconds: 3 })
+      assert.equal(started.mode, 'live')
+      assert.equal(spawnCount, 1, 'live preview must reuse the running ANC process')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      assert.equal(controller.micPreview.running, true)
+      await controller.stopMicPreview()
+      assert.equal(controller.micPreview.running, false)
+      assert.equal(controller.micPreview.phase, 'ready')
+      assert.equal(controller.anc.running, true, 'stopping mic preview must keep live ANC running')
+    } finally {
+      await controller.dispose()
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -612,10 +728,14 @@ async function main() {
   })
 
   await test('scanRokuDevices reads the live discovery CLI', async () => {
+    if (process.env.ROKU_SYNC_TEST_OFFLINE === '1') {
+      console.log('  skip real LAN discovery (offline mode; mocked discovery is covered separately)')
+      return
+    }
     const { dir, file } = tempConfigPath()
     const controller = freshController(file)
     try {
-      // Seeds only: no SSDP or arp chatter so the test stays offline-safe.
+      // The CLI also checks SSDP and ARP, so exclude this test in offline mode.
       controller.saveConfig({ rokuUrl: 'http://127.0.0.1:1' })
       const result = await controller.scanRokuDevices()
       assert.ok(Array.isArray(result.devices), 'devices is not an array')
@@ -846,9 +966,10 @@ async function main() {
       const address = await app.listen(0, '127.0.0.1')
       const base = `http://127.0.0.1:${address.port}`
       const html = await fetch(`${base}/`).then((response) => response.text())
-      for (const id of ['copy-token', 'scan-roku', 'roku-device-list', 'ping-live', 'ping-japan']) {
+      for (const id of ['copy-token', 'refresh-devices', 'toggle-preview', 'roku-device-list', 'ping-live', 'ping-japan']) {
         assert.ok(html.includes(`id="${id}"`), `${id} missing from index.html`)
       }
+      assert.ok(!html.includes('id="scan-roku"'), 'duplicate scan-roku button must remain removed')
       const renderer = await fetch(`${base}/renderer.js`).then((response) => response.text())
       assert.ok(renderer.includes('scanRokuDevices'), 'renderer has no scan call')
       assert.ok(renderer.includes('pingServer'), 'renderer has no ping call')
@@ -990,6 +1111,8 @@ async function main() {
 
     let renderState = null
     const pingCalls = []
+    let rescanCalls = 0
+    let playedCount = 0
     const configPatches = [], copiedTokens = []
     const api = {
       isElectron: true,
@@ -997,12 +1120,21 @@ async function main() {
       saveConfig: (patch) => { configPatches.push(patch); return Promise.resolve(state) },
       revealToken: () => Promise.resolve({ token: 'room-token' }),
       refreshDevices: () => Promise.resolve(state),
+      rescanAll: () => { rescanCalls += 1; return Promise.resolve(state) },
       startAnc: () => Promise.resolve(state),
       stopAnc: () => Promise.resolve(state),
       runSelfTest: () => Promise.resolve(state),
+      startMicPreview: () => Promise.resolve(state),
+      stopMicPreview: () => Promise.resolve(state),
+      getMicPreviewAudio: () => Promise.resolve({
+        clipId: 'clip-42',
+        cleanDataUrl: 'data:audio/wav;base64,Q0xFQU4=',
+        rawDataUrl: 'data:audio/wav;base64,UkFX',
+      }),
       startBridge: () => Promise.resolve(state),
       stopBridge: () => Promise.resolve(state),
       scanRokuDevices: () => Promise.resolve(state),
+      openLocalNetworkSettings: () => Promise.resolve(true),
       pingServer: (options) => { pingCalls.push(options); return Promise.resolve(state) },
       recentLogs: () => Promise.resolve([]),
       copy: (text) => { copiedTokens.push(text); return Promise.resolve(true) },
@@ -1102,6 +1234,377 @@ async function main() {
     elements.get('room-token').listeners.input[0]()
     await sampleButton('start-bridge')()
     assert.equal(configPatches.pop().token, '', 'explicitly clearing the field clears the saved token')
+
+    // Unified Rescan devices button triggers rescanAll (both audio + Roku LAN).
+    await sampleButton('refresh-devices')()
+    assert.equal(rescanCalls, 1, 'Rescan devices must trigger unified audio + Roku rescan')
+
+    // Ready mic preview hydrates the audio player and lets the user toggle Cleaned vs Raw.
+    elements.get('preview-audio').play = () => { playedCount += 1; return Promise.resolve() }
+    renderState(Object.assign({}, state, {
+      micPreview: {
+        running: false,
+        phase: 'ready',
+        clipId: 'clip-42',
+        elapsedMs: 5000,
+        totalMs: 5000,
+        micRmsDb: -18,
+        cleanRmsDb: -32,
+        error: null,
+        result: { duration_ms: 5000, mic_peak_db: -8.5, delay_ms: 184.0, suppression_db: 21.2 },
+      },
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(elements.get('preview-audio').src, 'data:audio/wav;base64,Q0xFQU4=')
+    assert.equal(playedCount, 1, 'completed mic preview auto-plays the ANC output once')
+    sampleButton('play-preview-raw')()
+    assert.equal(elements.get('preview-audio').src, 'data:audio/wav;base64,UkFX')
+    sampleButton('play-preview-clean')()
+    assert.equal(elements.get('preview-audio').src, 'data:audio/wav;base64,Q0xFQU4=')
+  })
+
+  await test('parseMediaLaunchUrl extracts YouTube and Netflix Roku + Chrome mirror targets', () => {
+    const { parseMediaLaunchUrl } = require('../desktop/controller.cjs')
+    const yt = parseMediaLaunchUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s')
+    assert.equal(yt.app, 'youtube')
+    assert.equal(yt.appId, '837')
+    assert.equal(yt.titleId, 'dQw4w9WgXcQ')
+    assert.equal(yt.ecpPath, '/launch/837?contentId=dQw4w9WgXcQ&mediaType=live')
+    const shortYt = parseMediaLaunchUrl('https://youtu.be/dQw4w9WgXcQ')
+    assert.equal(shortYt.titleId, 'dQw4w9WgXcQ')
+    const nf = parseMediaLaunchUrl('https://www.netflix.com/watch/80057281')
+    assert.equal(nf.app, 'netflix')
+    assert.equal(nf.appId, '12')
+    assert.equal(nf.titleId, '80057281')
+    assert.equal(nf.ecpPath, '/launch/12?contentID=80057281&mediaType=episode')
+    assert.throws(() => parseMediaLaunchUrl('http://insecure.example/watch/1'), /HTTPS/i)
+  })
+
+  await test('launchMirrorUrl coordinates relay mode, auto-starts ANC + bridge, and opens #roku-sync-ref', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    const { PassThrough } = require('node:stream')
+    const { EventEmitter } = require('node:events')
+    const relayPosts = []
+    const rokuHits = []
+    const openedChromeUrls = []
+
+    const fakeRelay = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => { body += c })
+      req.on('end', () => {
+        if (req.method === 'POST') relayPosts.push({ url: req.url, body: JSON.parse(body || '{}') })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, clients: {} }))
+      })
+    })
+    const fakeRoku = http.createServer((req, res) => {
+      rokuHits.push(req.url)
+      res.writeHead(200)
+      res.end('')
+    })
+
+    const fakeSpawn = (cmd, args) => {
+      if (cmd === '/usr/bin/open') {
+        openedChromeUrls.push(args[args.length - 1])
+        return { unref() {} }
+      }
+      const child = new EventEmitter()
+      child.pid = 8181
+      child.stdin = new PassThrough()
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.kill = (sig) => {
+        setTimeout(() => { child.emit('exit', 0, sig); child.emit('close', 0, sig) }, 5)
+        return true
+      }
+      return child
+    }
+
+    const controller = new DesktopController({
+      rootDir: ROOT,
+      configPath: file,
+      spawn: fakeSpawn,
+      mirrorPollMs: 0,
+    })
+    try {
+      await new Promise((r) => fakeRelay.listen(0, '127.0.0.1', r))
+      await new Promise((r) => fakeRoku.listen(0, '127.0.0.1', r))
+      controller.saveConfig({
+        serverUrl: `http://127.0.0.1:${fakeRelay.address().port}`,
+        token: 'room-secret',
+        rokuUrl: `http://127.0.0.1:${fakeRoku.address().port}`,
+      })
+      const out = await controller.launchMirrorUrl('https://www.youtube.com/watch?v=aqz-KE-bpKQ')
+      assert.equal(out.ok, true)
+      assert.equal(controller.anc.running, true, 'ANC must auto-start so Chrome is muted in the room')
+      assert.equal(controller.bridge.running, true, 'Roku bridge must auto-start so live timestamps feed the relay')
+      assert.equal(relayPosts[0].url, '/baton')
+      assert.equal(relayPosts[0].body.sync_mode, 'roku')
+      assert.equal(relayPosts[1].url, '/event')
+      assert.equal(relayPosts[1].body.title_id, 'aqz-KE-bpKQ')
+      assert.ok(rokuHits.some((u) => u.startsWith('/launch/837?contentId=aqz-KE-bpKQ')))
+      if (process.platform === 'darwin') {
+        assert.deepEqual(openedChromeUrls, ['https://www.youtube.com/watch?v=aqz-KE-bpKQ#roku-sync-ref'])
+      }
+    } finally {
+      await controller.dispose()
+      await new Promise((r) => fakeRelay.close(r))
+      await new Promise((r) => fakeRoku.close(r))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('local Roku poll gives up on an unreachable TV within its budget', async () => {
+    const { dir, file } = tempConfigPath()
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file, mirrorPollMs: 0 })
+    try {
+      // Non-routable address: connect() never completes, so only a wall-clock
+      // deadline can end the request early.
+      controller.saveConfig({ rokuUrl: 'http://10.255.255.1:8060' })
+      const started = Date.now()
+      const result = await controller.pollLocalRokuOnce(300)
+      assert.equal(result, null)
+      assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`)
+    } finally {
+      await controller.dispose()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('syncMirrorOnce auto-opens silent Chrome reference tab on Slave laptop and tracks synced telemetry', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    const opened = []
+    let roomPayload = {
+      sync_mode: 'peer',
+      title_id: '80057281',
+      app_name: 'Netflix',
+      master_client_id: 'japan-pc',
+      master_state: {
+        client_id: 'japan-pc',
+        title_id: '80057281',
+        app: 'netflix',
+        position_ms: 62000,
+        paused: false,
+        client_ms: Date.now(),
+        received_at_ms: Date.now(),
+      },
+      clients: {},
+    }
+    const fakeRelay = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(roomPayload))
+    })
+    const controller = new DesktopController({
+      rootDir: ROOT,
+      configPath: file,
+      mirrorPollMs: 0,
+      localRokuPollMs: 0,
+    })
+    controller.openInChrome = (url) => { opened.push(url); return true }
+    controller.anc.running = true
+    try {
+      await new Promise((r) => fakeRelay.listen(0, '127.0.0.1', r))
+      controller.saveConfig({
+        serverUrl: `http://127.0.0.1:${fakeRelay.address().port}`,
+        token: 'room-secret',
+        autoMirrorChrome: true,
+      })
+      const first = await controller.syncMirrorOnce()
+      assert.deepEqual(opened, ['https://www.netflix.com/watch/80057281#roku-sync-ref'])
+      assert.equal(first.state, 'opening')
+
+      // Once the ref-* Chrome tab connects and reports telemetry, mirror flips to synced and opens no more tabs.
+      const now = Date.now()
+      roomPayload.master_state.client_ms = now
+      roomPayload.master_state.received_at_ms = now
+      roomPayload.clients['ref-macbook'] = {
+        title_id: '80057281',
+        app: 'netflix',
+        position_ms: 62120,
+        paused: false,
+        client_ms: now,
+        received_at_ms: now,
+      }
+      const second = await controller.syncMirrorOnce()
+      assert.equal(second.state, 'synced')
+      assert.ok(second.driftMs >= 110 && second.driftMs <= 125, `driftMs=${second.driftMs}`)
+      assert.equal(opened.length, 1, 'must not spawn duplicate Chrome tabs once synced')
+    } finally {
+      await controller.dispose()
+      await new Promise((r) => fakeRelay.close(r))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('syncMirrorOnce never reopens duplicate tabs on a timer and ignores unavailable or mismatched Roku state', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    const opened = []
+    let roomPayload = {
+      sync_mode: 'roku',
+      roku: 'unavailable',
+      app_id: '13535',
+      app_name: 'Plex',
+      position_ms: 627615,
+      title_id: '70208247',
+      launch_status: 'sent',
+      last_update: Date.now() / 1000,
+      clients: {},
+    }
+    const fakeRelay = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(roomPayload))
+    })
+    const controller = new DesktopController({
+      rootDir: ROOT,
+      configPath: file,
+      mirrorPollMs: 0,
+      localRokuPollMs: 0,
+    })
+    controller.openInChrome = (url) => { opened.push(url); return true }
+    controller.anc.running = true
+    try {
+      await new Promise((r) => fakeRelay.listen(0, '127.0.0.1', r))
+      controller.saveConfig({
+        serverUrl: `http://127.0.0.1:${fakeRelay.address().port}`,
+        token: 'room-secret',
+        autoMirrorChrome: true,
+      })
+      // 1. Stale title_id 70208247 while Roku is unavailable / on Plex must NOT open Netflix!
+      await controller.syncMirrorOnce()
+      assert.deepEqual(opened, [], 'must not open Netflix tab when Roku is unavailable or playing Plex')
+
+      // 2. Now Roku actually plays Netflix 70208247, and Chrome extension never reports back:
+      //    even if lastMirrorOpen was 10 minutes ago, it must NEVER open a second tab!
+      roomPayload = Object.assign({}, roomPayload, {
+        roku: 'play',
+        app_id: '12',
+        app_name: 'Netflix',
+        last_update: Date.now() / 1000,
+      })
+      await controller.syncMirrorOnce()
+      assert.equal(opened.length, 1)
+      controller._lastMirrorOpen.at = Date.now() - 600_000
+      await controller.syncMirrorOnce()
+      await controller.syncMirrorOnce()
+      assert.equal(opened.length, 1, 'must NEVER spawn duplicate tabs for the same titleId on a timer')
+    } finally {
+      await controller.dispose()
+      await new Promise((r) => fakeRelay.close(r))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('ANC lag telemetry reaches /api/local-mirror and the reference opens in its own Chrome profile', async () => {
+    const { dir, file } = tempConfigPath()
+    const spawned = []
+    const fakeSpawn = (cmd, args, opts) => {
+      spawned.push({ cmd, args, env: opts && opts.env })
+      const { EventEmitter } = require('node:events')
+      const { PassThrough } = require('node:stream')
+      const child = new EventEmitter()
+      child.pid = 4242
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.stdin = new PassThrough()
+      child.kill = () => {}
+      child.unref = () => {}
+      return child
+    }
+    const profile = path.join(dir, 'Reference Chrome')
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn, referenceProfileDir: profile })
+    try {
+      controller.startAnc()
+      const anc = spawned.find((s) => s.args.some((a) => String(a).endsWith('aec_daemon.py')))
+      assert.ok(anc.args.includes('--block') && anc.args.includes('160'), 'live ANC runs 10 ms blocks')
+      assert.equal(anc.env.ROKU_SYNC_REFERENCE_PROFILE, profile, 'the tap only mutes the reference profile')
+      assert.equal(controller.getLocalMirrorState().acoustic, null, 'no lock before the first measurement')
+      controller._onAncLine(JSON.stringify({ event: 'telemetry', delay_ms: 175, erle_db: 30,
+        acoustic_lead_ms: 175.2, acoustic_score: 140, acoustic_measurements: 3, target_lead_ms: 200, mic_delay_ms: 0 }))
+      const ac = controller.getLocalMirrorState().acoustic
+      assert.equal(ac.leadMs, 175.2)
+      assert.equal(ac.targetLeadMs, 200)
+      assert.equal(ac.seq, 3)
+      assert.ok(ac.session, 'session id lets the extension notice a restarted daemon')
+      assert.equal(controller.getLocalMirrorState(Date.now() + 10000).acoustic, null, 'stale measurements expire')
+
+      spawned.length = 0
+      assert.equal(controller.openInChrome('https://www.netflix.com/watch/1#roku-sync-ref'), true)
+      const open = spawned[0]
+      assert.equal(open.cmd, '/usr/bin/open')
+      assert.ok(open.args.includes('-n'), 'a separate Chrome instance')
+      assert.ok(open.args.includes(`--user-data-dir=${profile}`))
+      assert.equal(open.args[open.args.length - 1], 'https://www.netflix.com/watch/1#roku-sync-ref')
+    } finally {
+      await controller.dispose()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  await test('local Roku player poller feeds /api/local-mirror directly without cloud relay', async () => {
+    const { dir, file } = tempConfigPath()
+    const http = require('node:http')
+    const fakeRoku = http.createServer((req, res) => {
+      if (req.url === '/query/media-player') {
+        res.writeHead(200, { 'Content-Type': 'text/xml' })
+        res.end('<player state="play" error="false"><plugin id="12" name="Netflix"/><position>75400 ms</position></player>')
+        return
+      }
+      res.writeHead(404).end()
+    })
+    const controller = new DesktopController({
+      rootDir: ROOT,
+      configPath: file,
+      mirrorPollMs: 0,
+      localRokuPollMs: 0,
+    })
+    const uiServer = createServer({ controller })
+    try {
+      await new Promise((r) => fakeRoku.listen(0, '127.0.0.1', r))
+      const addr = await uiServer.listen(0, '127.0.0.1')
+      controller.saveConfig({
+        rokuUrl: `http://127.0.0.1:${fakeRoku.address().port}`,
+        token: '',
+      })
+      await controller.pollLocalRokuOnce()
+      assert.equal(controller.bridge.roku, 'play')
+      assert.equal(controller.bridge.app_name, 'Netflix')
+      assert.equal(controller.bridge.position_ms, 75400)
+
+      const mirror = await fetch(`http://127.0.0.1:${addr.port}/api/local-mirror`).then((r) => r.json())
+      assert.equal(mirror.active, true)
+      assert.equal(mirror.roku, 'play')
+      assert.equal(mirror.app, 'netflix')
+      assert.ok(mirror.positionMs >= 75400 && mirror.positionMs < 77000, `positionMs=${mirror.positionMs}`)
+
+      // Reference tab sends heartbeat directly to local server (even cross-origin from netflix.com).
+      const hb = await fetch(`http://127.0.0.1:${addr.port}/api/local-mirror/heartbeat`, {
+        method: 'POST',
+        headers: {
+          Origin: 'https://www.netflix.com',
+          'Sec-Fetch-Site': 'cross-site',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_id: 'ref-local-1',
+          app: 'netflix',
+          title_id: '70208247',
+          position_ms: 75420,
+          paused: false,
+          ready_state: 4,
+        }),
+      }).then((r) => r.json())
+      assert.equal(hb.ok, true)
+      assert.equal(controller.mirror.state, 'synced')
+      assert.equal(controller.mirror.titleId, '70208247')
+    } finally {
+      await controller.dispose()
+      await uiServer.close()
+      await new Promise((r) => fakeRoku.close(r))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   console.log('desktop local UI server')

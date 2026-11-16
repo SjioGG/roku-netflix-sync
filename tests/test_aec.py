@@ -773,6 +773,10 @@ class LiveAutoSelectionTest(unittest.TestCase):
         saved = aec._sd
         aec._sd = FakeSoundDevice
         self.addCleanup(setattr, aec, '_sd', saved)
+        saved_tap = os.environ.get('ROKU_SYNC_CHROME_TAP')
+        os.environ['ROKU_SYNC_CHROME_TAP'] = ''
+        self.addCleanup(lambda: os.environ.pop('ROKU_SYNC_CHROME_TAP', None)
+                        if saved_tap is None else os.environ.update(ROKU_SYNC_CHROME_TAP=saved_tap))
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             code = aec.main(argv)
@@ -869,6 +873,252 @@ class DeviceListTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught:
             aec.run_live_ffmpeg(ref_index=1, mic_index=2)
         self.assertIn('out-index', str(caught.exception))
+
+
+class MicPreviewTest(unittest.TestCase):
+    """Discord-style mic preview captures both raw and ANC-cleaned WAVs."""
+
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp(prefix='aec-preview-test-')
+        self.addCleanup(shutil.rmtree, self.tempdir, True)
+        saved_tap = os.environ.get('ROKU_SYNC_CHROME_TAP')
+        os.environ['ROKU_SYNC_CHROME_TAP'] = ''
+        self.addCleanup(lambda: os.environ.pop('ROKU_SYNC_CHROME_TAP', None)
+                        if saved_tap is None else os.environ.update(ROKU_SYNC_CHROME_TAP=saved_tap))
+
+    def test_standalone_preview_suppresses_echo_and_writes_both_wavs(self):
+        rate = 8000
+        seconds = 3.0
+        ref_signal, mic_signal, near_end, _ = aec._synthetic_room(
+            sample_rate=rate, seconds=seconds, delay_ms=160.0, burst=(2.0, 2.5, 0.22))
+        cursor = {'ref': 0, 'mic': 0}
+
+        class FakeInputStream:
+            def __init__(self, kind):
+                self.kind = kind
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size):
+                buf = ref_signal if self.kind == 'ref' else mic_signal
+                pos = cursor[self.kind]
+                chunk = buf[pos:pos + size]
+                if len(chunk) < size:
+                    chunk = chunk + [0.0] * (size - len(chunk))
+                cursor[self.kind] = pos + size
+                return ([[sample] for sample in chunk], None)
+
+        devices = [
+            {'name': 'MacBook Pro Microphone', 'max_input_channels': 1, 'max_output_channels': 0},
+            {'name': 'BlackHole 2ch', 'max_input_channels': 2, 'max_output_channels': 2},
+            {'name': 'ZoomAudioDevice', 'max_input_channels': 2, 'max_output_channels': 2},
+        ]
+
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices():
+                return devices
+
+            @staticmethod
+            def InputStream(**kwargs):
+                kind = 'ref' if kwargs['device'] == 'BlackHole 2ch' else 'mic'
+                return FakeInputStream(kind)
+
+        saved = aec._sd
+        aec._sd = FakeSoundDevice
+        self.addCleanup(setattr, aec, '_sd', saved)
+
+        clean_path = os.path.join(self.tempdir, 'clean.wav')
+        raw_path = os.path.join(self.tempdir, 'raw.wav')
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = aec.main([
+                '--preview', '--auto', '--json',
+                '--sample-rate', str(rate),
+                '--preview-seconds', str(seconds),
+                '--preview-clean-wav', clean_path,
+                '--preview-raw-wav', raw_path,
+            ])
+        self.assertEqual(code, 0)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+        kinds = [event.get('event') for event in events]
+        self.assertIn('preview_start', kinds)
+        self.assertIn('preview_progress', kinds)
+        self.assertIn('preview_done', kinds)
+
+        raw_samples, raw_rate = aec.read_wav(raw_path)
+        clean_samples, clean_rate = aec.read_wav(clean_path)
+        self.assertEqual(raw_rate, rate)
+        self.assertEqual(clean_rate, rate)
+        self.assertEqual(len(raw_samples), len(clean_samples))
+        # Echo-only segment (1.0s - 1.8s) must be strongly attenuated in clean vs raw.
+        s0, s1 = int(1.0 * rate), int(1.8 * rate)
+        achieved_erle = 10.0 * math.log10((energy(raw_samples[s0:s1]) + 1e-12)
+                                          / (energy(clean_samples[s0:s1]) + 1e-12))
+        self.assertGreater(achieved_erle, 12.0,
+                           'preview clean WAV only suppressed echo by %.2f dB' % achieved_erle)
+        # Voice burst (2.0s - 2.5s) must remain audible.
+        b0, b1 = int(2.0 * rate), int(2.5 * rate)
+        voice_kept = 10.0 * math.log10((energy(clean_samples[b0:b1]) + 1e-12)
+                                       / (energy(near_end[b0:b1]) + 1e-12))
+        self.assertGreater(voice_kept, -6.0)
+
+    def test_live_stdin_preview_tees_running_daemon_without_stopping_it(self):
+        rate = 8000
+        block = 512
+        clean_path = os.path.join(self.tempdir, 'live-clean.wav')
+        raw_path = os.path.join(self.tempdir, 'live-raw.wav')
+
+        class FakeStream:
+            def __init__(self, kind):
+                self.kind = kind
+                self.calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size):
+                self.calls += 1
+                if self.calls > 18:
+                    raise KeyboardInterrupt
+                val = 0.12 if self.kind == 'mic' else 0.0
+                return ([[val]] * size, None)
+
+            def write(self, data):
+                pass
+
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices():
+                return [
+                    {'name': 'MacBook Pro Microphone', 'max_input_channels': 1, 'max_output_channels': 0},
+                    {'name': 'ZoomAudioDevice', 'max_input_channels': 2, 'max_output_channels': 2},
+                ]
+
+            @staticmethod
+            def InputStream(**kwargs):
+                kind = 'mic' if kwargs['device'] == 'MacBook Pro Microphone' else 'ref'
+                return FakeStream(kind)
+
+            @staticmethod
+            def OutputStream(**kwargs):
+                return FakeStream('out')
+
+        saved = aec._sd
+        aec._sd = FakeSoundDevice
+        self.addCleanup(setattr, aec, '_sd', saved)
+
+        cmd_stream = io.StringIO(json.dumps({
+            'cmd': 'preview',
+            'id': 'clip-1',
+            'seconds': 0.5,
+            'clean_wav': clean_path,
+            'raw_wav': raw_path,
+        }) + '\n')
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            aec.run_live(sample_rate=rate, block_size=block, auto=True,
+                         json_output=True, command_stream=cmd_stream)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+        done = [e for e in events if e.get('event') == 'preview_done']
+        self.assertEqual(len(done), 1, events)
+        self.assertEqual(done[0]['id'], 'clip-1')
+        self.assertTrue(os.path.exists(clean_path))
+        self.assertTrue(os.path.exists(raw_path))
+        clean_samples, _ = aec.read_wav(clean_path)
+        self.assertGreaterEqual(len(clean_samples), int(0.5 * rate))
+
+    def test_chrome_tap_is_preferred_when_helper_is_present_and_streams_reference(self):
+        rate = 8000
+        seconds = 3.0
+        ref_signal, mic_signal, near_end, _ = aec._synthetic_room(
+            sample_rate=rate, seconds=seconds, delay_ms=140.0, burst=(2.0, 2.4, 0.22))
+        mic_cursor = {'pos': 0}
+
+        # Synthetic tap helper script that streams ref_signal as float32le PCM on stdout.
+        tap_script = os.path.join(self.tempdir, 'fake-chrome-tap.py')
+        ref_bin = os.path.join(self.tempdir, 'ref.f32')
+        import struct
+        with open(ref_bin, 'wb') as f:
+            f.write(struct.pack('<%df' % len(ref_signal), *ref_signal))
+        with open(tap_script, 'w', encoding='utf-8') as f:
+            f.write('#!%s\nimport sys\n' % sys.executable)
+            f.write('if "--check" in sys.argv:\n    print("{\\"ok\\":true}"); sys.exit(0)\n')
+            f.write('data = open(%r, "rb").read()\n' % ref_bin)
+            f.write('sys.stdout.buffer.write(data)\nsys.stdout.buffer.flush()\n')
+        os.chmod(tap_script, 0o755)
+
+        class FakeMicStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size):
+                pos = mic_cursor['pos']
+                chunk = mic_signal[pos:pos + size]
+                if len(chunk) < size:
+                    chunk = chunk + [0.0] * (size - len(chunk))
+                mic_cursor['pos'] = pos + size
+                return ([[sample] for sample in chunk], None)
+
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices():
+                # Even with only ONE virtual device installed, Chrome Tap splits the buses!
+                return [
+                    {'name': 'MacBook Pro Microphone', 'max_input_channels': 1, 'max_output_channels': 0},
+                    {'name': 'ZoomAudioDevice', 'max_input_channels': 2, 'max_output_channels': 2},
+                ]
+
+            @staticmethod
+            def InputStream(**kwargs):
+                if kwargs['device'] == aec.CHROME_TAP_DEVICE_NAME:
+                    raise AssertionError('sounddevice must not open the CoreAudio tap pseudo-device')
+                return FakeMicStream()
+
+        saved_sd = aec._sd
+        aec._sd = FakeSoundDevice
+        self.addCleanup(setattr, aec, '_sd', saved_sd)
+        saved_env = os.environ.get('ROKU_SYNC_CHROME_TAP')
+        os.environ['ROKU_SYNC_CHROME_TAP'] = tap_script
+
+        def restore_env():
+            if saved_env is None:
+                os.environ.pop('ROKU_SYNC_CHROME_TAP', None)
+            else:
+                os.environ['ROKU_SYNC_CHROME_TAP'] = saved_env
+        self.addCleanup(restore_env)
+
+        found = aec.discover_audio_devices()
+        self.assertEqual(found['recommended']['ref_device'], aec.CHROME_TAP_DEVICE_NAME)
+        self.assertEqual(found['recommended']['out_device'], 'ZoomAudioDevice')
+        self.assertFalse(any('Only one virtual audio device' in n for n in found['recommended']['notes']))
+
+        clean_path = os.path.join(self.tempdir, 'tap-clean.wav')
+        raw_path = os.path.join(self.tempdir, 'tap-raw.wav')
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = aec.main([
+                '--preview', '--auto', '--json',
+                '--sample-rate', str(rate),
+                '--preview-seconds', str(seconds),
+                '--preview-clean-wav', clean_path,
+                '--preview-raw-wav', raw_path,
+            ])
+        self.assertEqual(code, 0)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+        done = [e for e in events if e.get('event') == 'preview_done'][-1]
+        self.assertGreater(done['ref_rms_db'], -30.0)
+        self.assertGreater(done['suppression_db'], 8.0)
 
 
 if __name__ == '__main__':

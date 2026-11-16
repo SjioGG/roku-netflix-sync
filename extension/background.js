@@ -2,6 +2,29 @@ const STREAMING_HOST = /^https?:\/\/([^/]+\.)?(netflix\.com|youtube\.com|plex\.t
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (!sender.tab || !STREAMING_HOST.test(sender.url || '')) return;
+  if (message?.type === 'local-mirror') {
+    (async () => {
+      if (!await chrome.permissions.contains({origins: ['http://127.0.0.1/*']})) {
+        throw Error('Local loopback access is not granted yet.');
+      }
+      const hb = message.heartbeat && typeof message.heartbeat === 'object' ? message.heartbeat : null;
+      const endpoint = hb
+        ? 'http://127.0.0.1:8767/api/local-mirror/heartbeat'
+        : 'http://127.0.0.1:8767/api/local-mirror';
+      const response = await fetch(endpoint, {
+        method: hb ? 'POST' : 'GET',
+        headers: hb ? {'Content-Type': 'application/json'} : {'Accept': 'application/json'},
+        redirect: 'error',
+        credentials: 'omit',
+        ...(hb ? {body: JSON.stringify(hb)} : {}),
+        signal: AbortSignal.timeout(1500),
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error || `HTTP ${response.status}`);
+      return hb && data.mirror ? data.mirror : data;
+    })().then(data => respond({data}), err => respond({error: err.message}));
+    return true;
+  }
   (async () => {
     const {server, token, rokuLeadMs, enabled, syncMode, privacyConsent} = await chrome.storage.local.get(['server','token','rokuLeadMs','enabled','syncMode','privacyConsent']);
     if (enabled !== true || privacyConsent?.version !== 1 || privacyConsent.server !== server) return {disabled: true};

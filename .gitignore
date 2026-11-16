@@ -7,6 +7,7 @@ recordings/
 .env
 desktop/node_modules/
 desktop/.electron-cache/
+desktop/bin/
 dist/
 *.wav
 *.log

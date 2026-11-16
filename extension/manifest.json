@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "roku-sync",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Experimental playback sync between browsers or a browser and Roku. Requires a configured relay; Roku mode needs LAN access.",
   "permissions": [
     "storage"
@@ -36,6 +36,24 @@
         "player-bridge.js"
       ],
       "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.netflix.com/*",
+        "https://www.youtube.com/*",
+        "https://app.plex.tv/*",
+        "https://*.plex.direct/*",
+        "https://www.primevideo.com/*",
+        "https://www.disneyplus.com/*",
+        "https://play.max.com/*",
+        "https://tv.apple.com/*",
+        "https://www.hulu.com/*",
+        "https://www.twitch.tv/*"
+      ],
+      "js": [
+        "ref-marker.js"
+      ],
       "run_at": "document_start"
     },
     {

@@ -28,16 +28,20 @@ jobs:
       - name: Package server release bundle
         run: |
           mkdir -p release-bundle/desktop/assets release-bundle/bin
-          cp sync_server.py roku_client.py roku_dashboard.py local_env.py aec_daemon.py dashboard.html README.md ARCHITECTURE.md PRIVACY.md release-bundle/
+          cp sync_server.py roku_client.py roku_dashboard.py local_env.py aec_daemon.py aec_webrtc.py dashboard.html README.md ARCHITECTURE.md PRIVACY.md release-bundle/
           cp .env.example release-bundle/
           cp dist/roku-netflix-sync-extension.zip release-bundle/
           cp desktop/package.json desktop/main.js desktop/preload.js desktop/controller.cjs desktop/local-env.cjs desktop/runtime.cjs \
-             desktop/server.cjs desktop/index.html desktop/renderer.js desktop/styles.css release-bundle/desktop/
+             desktop/server.cjs desktop/index.html desktop/renderer.js desktop/styles.css \
+             desktop/chrome-audio-tap.swift desktop/macos-launcher.c desktop/python-runtime.json desktop/requirements-audio.txt \
+             release-bundle/desktop/
           cp desktop/assets/app-icon.png desktop/assets/app-icon.icns release-bundle/desktop/assets/
           cp bin/package-extension.sh bin/launch-desktop.sh bin/render-privacy.py bin/install-mac-app.py bin/render-app-icon.swift release-bundle/bin/
           chmod +x release-bundle/bin/*.sh
           tar czf build.tar.gz -C release-bundle .
           tar tzf build.tar.gz | grep -qx './aec_daemon.py' || { echo 'aec_daemon.py missing from build.tar.gz' >&2; exit 1; }
+          tar tzf build.tar.gz | grep -qx './aec_webrtc.py' || { echo 'aec_webrtc.py missing from build.tar.gz' >&2; exit 1; }
+          tar tzf build.tar.gz | grep -qx './desktop/chrome-audio-tap.swift' || { echo 'chrome-audio-tap.swift missing from build.tar.gz' >&2; exit 1; }
           tar tzf build.tar.gz | grep -qx './desktop/controller.cjs' || { echo 'desktop/controller.cjs missing from build.tar.gz' >&2; exit 1; }
           tar tzf build.tar.gz | grep -qx './bin/launch-desktop.sh' || { echo 'bin/launch-desktop.sh missing from build.tar.gz' >&2; exit 1; }
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob:; connect-src 'self'">
   <title>Roku Sync</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -19,7 +19,7 @@
     </div>
     <div class="titlebar-actions">
       <span id="connection-chip" class="chip chip-idle">Idle</span>
-      <button id="refresh-devices" class="ghost" type="button" title="Re-scan audio devices">Rescan devices</button>
+      <button id="refresh-devices" class="ghost" type="button" title="Re-scan audio and Roku LAN devices">Rescan devices</button>
     </div>
   </header>
 
@@ -65,9 +65,29 @@
       </div>
 
       <div class="callout">
-        In Messenger / Discord mic settings, select the <strong>Virtual Mic Output</strong>
-        device above. <code>ZoomAudioDevice</code> is already installed on your Mac and shows
-        up directly inside Messenger's microphone dropdown.
+        <strong>Silent Chrome TV Mirror:</strong> Keep the same YouTube or Netflix video playing
+        <strong>unmuted</strong> inside Chrome. With <code>Chrome Audio Tap (Auto-mute in room)</code>
+        selected above, macOS automatically mutes Chrome on your speakers while feeding its clean
+        digital reference into the echo canceller. Then pick your <strong>Virtual Mic Output</strong>
+        in Discord / Messenger.
+      </div>
+
+      <div class="field mirror-launcher">
+        <div class="field-head">
+          <label for="mirror-url">Synchronized TV + Silent Chrome Reference</label>
+          <span id="mirror-chip" class="chip chip-idle">Idle</span>
+        </div>
+        <div class="secret">
+          <input id="mirror-url" type="url" spellcheck="false"
+                 placeholder="https://www.youtube.com/watch?v=... or https://www.netflix.com/watch/...">
+          <button id="launch-mirror" class="secondary small" type="button">Play on Roku + Chrome</button>
+        </div>
+        <label class="checkbox">
+          <input type="checkbox" id="auto-mirror-chrome" checked>
+          <span>Auto-keep silent Chrome reference tab open &amp; synced to TV / Master (Slave mode)</span>
+        </label>
+        <p class="hint">The silent reference plays in its own Chrome window, so calls in your normal Chrome stay audible. First time: <button id="open-reference-chrome" class="secondary small" type="button">Set up reference Chrome</button> then sign in to Netflix and add the roku-sync extension in that window.</p>
+        <p id="mirror-status" class="hint">Keeps a silent Chrome reference tab locked to your Roku TV or Master browser so TV audio is cancelled automatically.</p>
       </div>
 
       <div id="device-warning" class="warning hidden" role="status">
@@ -81,7 +101,12 @@
         </div>
       </div>
 
-      <div class="meters">
+      <div class="meters meters-4">
+        <div class="meter">
+          <span class="meter-label">TV reference signal</span>
+          <span id="ref-level-value" class="meter-value">Silent</span>
+          <div class="meter-track"><div id="ref-level-bar" class="meter-fill accent"></div></div>
+        </div>
         <div class="meter">
           <span class="meter-label">Measured TV delay</span>
           <span id="delay-value" class="meter-value">0.0 <small>ms</small></span>
@@ -106,6 +131,30 @@
       </div>
       <p id="selftest-result" class="hint mono"></p>
       <p id="anc-error" class="error hidden"></p>
+      <div class="inline-actions">
+        <button id="open-audio-capture" class="ghost small hidden" type="button">Open System Audio Recording Settings</button>
+      </div>
+
+      <div class="mic-preview" aria-labelledby="preview-title">
+        <div class="preview-head">
+          <div>
+            <h3 id="preview-title">Mic Check &amp; Playback Preview</h3>
+            <p class="hint">Record 5s to hear your voice after TV echo cancellation vs raw mic</p>
+          </div>
+          <span id="preview-status" class="chip chip-idle">Ready</span>
+        </div>
+        <div class="meter-track preview-meter" aria-hidden="true">
+          <div id="preview-level-bar" class="meter-fill good"></div>
+        </div>
+        <div class="actions preview-actions">
+          <button id="toggle-preview" class="secondary small" type="button">Test Mic (5s Preview)</button>
+          <button id="play-preview-clean" class="ghost small hidden" type="button">Play ANC Output</button>
+          <button id="play-preview-raw" class="ghost small hidden" type="button">Play Raw Mic</button>
+        </div>
+        <audio id="preview-audio" class="preview-audio hidden" controls preload="metadata"></audio>
+        <p id="preview-summary" class="hint mono">Speak while TV audio plays to preview what Discord and Messenger hear.</p>
+        <p id="preview-error" class="error hidden"></p>
+      </div>
     </section>
 
     <!-- ---------------------------------------------------------------- -->
@@ -142,11 +191,13 @@
       <div class="field">
         <div class="field-head">
           <label for="roku-url">Roku LAN URL</label>
-          <button id="scan-roku" class="ghost small" type="button">Scan LAN for Rokus</button>
         </div>
         <input id="roku-url" type="url" spellcheck="false" placeholder="http://192.168.1.100:8060">
         <div id="roku-device-list" class="airplay-list" role="listbox" aria-label="Discovered Roku devices"></div>
         <p id="roku-scan-summary" class="hint"></p>
+        <div class="inline-actions">
+          <button id="open-local-network" class="ghost small hidden" type="button">Open Local Network Settings</button>
+        </div>
       </div>
 
       <div class="roku-state">

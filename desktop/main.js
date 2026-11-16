@@ -8,10 +8,15 @@
  */
 
 const path = require('node:path')
-const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron')
+const { app, BrowserWindow, ipcMain, net, shell, clipboard } = require('electron')
 app.setName('Roku Sync')
+const smoke = process.env.ROKU_SYNC_DESKTOP_SMOKE === '1'
+if (smoke && process.env.ROKU_SYNC_SMOKE_USER_DATA) {
+  app.setPath('userData', process.env.ROKU_SYNC_SMOKE_USER_DATA)
+}
 require('./runtime.cjs').configureRuntime({ packaged: app.isPackaged, userData: app.getPath('userData') })
 const { DesktopController } = require('./controller.cjs')
+const { createServer, DEFAULT_PORT, DEFAULT_HOST } = require('./server.cjs')
 
 // Opening the Dock icon again should focus the existing control center.
 const hasInstanceLock = app.requestSingleInstanceLock()
@@ -22,8 +27,23 @@ app.on('second-instance', () => {
 })
 
 let controller = null
+let localMirrorServer = null
 let window = null
 const recentLog = []
+
+function nudgeMacLocalNetworkPrompt() {
+  if (smoke || process.platform !== 'darwin' || !controller || !net || typeof net.fetch !== 'function') return
+  try {
+    const parsed = new URL(controller.getConfig().rokuUrl || 'http://192.168.1.100:8060')
+    if (parsed.protocol !== 'http:') return
+    if (!/^(?:192\.168\.|10\.|172\.(?:1[6-9]|2\d|3[01])\.)\d/.test(parsed.hostname)) return
+    net.fetch(`${parsed.origin}/query/device-info`, { signal: AbortSignal.timeout(1200) })
+      .then((res) => res.arrayBuffer())
+      .catch(() => {})
+  } catch {
+    /* ignore malformed custom URL */
+  }
+}
 
 function broadcast() {
   if (window && !window.isDestroyed()) {
@@ -63,9 +83,16 @@ function createWindow() {
 
   // The device poll is what makes plugging the soundcard in show up here, so it
   // runs only while the window is open.
+  let scannedLanOnOpen = false
   window.on('show', () => {
+    if (smoke) return
     controller.startDevicePolling()
     controller.refreshDevices().catch(() => {})
+    if (!scannedLanOnOpen) {
+      scannedLanOnOpen = true
+      nudgeMacLocalNetworkPrompt()
+      controller.scanRokuDevices().catch(() => {})
+    }
   })
   window.on('hide', () => controller.stopDevicePolling())
   window.on('closed', () => controller.stopDevicePolling())
@@ -87,6 +114,10 @@ function registerIpc() {
     return controller.snapshot()
   })
   handle('devices:refresh', () => controller.refreshDevices().then(() => controller.snapshot()))
+  handle('devices:rescan-all', async () => {
+    nudgeMacLocalNetworkPrompt()
+    return controller.rescanAll()
+  })
   handle('anc:start', () => {
     const result = controller.startAnc()
     return Object.assign({ snapshot: controller.snapshot() }, result)
@@ -99,6 +130,25 @@ function registerIpc() {
     await controller.runSelfTest()
     return controller.snapshot()
   })
+  handle('anc:preview-start', (options) => {
+    const result = controller.startMicPreview(options || {})
+    return Object.assign({ snapshot: controller.snapshot() }, result)
+  })
+  handle('anc:preview-stop', async () => {
+    await controller.stopMicPreview()
+    return controller.snapshot()
+  })
+  handle('anc:preview-audio', () => controller.getMicPreviewAudio())
+  handle('mirror:open-reference-chrome', () => controller.openReferenceChrome())
+  handle('mirror:launch', (payload) => {
+    const body = payload && typeof payload === 'object' ? payload : { url: payload }
+    return controller.launchMirrorUrl(body.url, body)
+  })
+  handle('system:open-audio-capture', () => {
+    if (process.platform !== 'darwin') return false
+    return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+      .then(() => true, () => false)
+  })
   handle('bridge:start', () => {
     const result = controller.startRokuBridge()
     return Object.assign({ snapshot: controller.snapshot() }, result)
@@ -109,8 +159,14 @@ function registerIpc() {
   })
   handle('logs:recent', () => recentLog.slice(-60))
   handle('roku:scan', async () => {
+    nudgeMacLocalNetworkPrompt()
     await controller.scanRokuDevices()
     return controller.snapshot()
+  })
+  handle('system:open-local-network', () => {
+    if (process.platform !== 'darwin') return false
+    return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork')
+      .then(() => true, () => false)
   })
   handle('ping:run', async (options) => {
     await controller.pingServer(options || {})
@@ -132,8 +188,13 @@ app.whenReady().then(() => {
   controller = new DesktopController({ rootDir: path.join(__dirname, '..') })
   attach(controller)
   registerIpc()
-  // Discovery and the ping tester run on startup so the window opens with data.
-  if (process.env.ROKU_SYNC_DESKTOP_SMOKE !== '1') controller.scanRokuDevices().catch(() => {})
+  if (!smoke) {
+    localMirrorServer = createServer({ controller })
+    localMirrorServer.listen(DEFAULT_PORT, DEFAULT_HOST).catch((err) => {
+      localMirrorServer = null
+      recentLog.push({ source: 'local-mirror', line: `Port ${DEFAULT_PORT} unavailable: ${err.message}` })
+    })
+  }
 
   createWindow()
   app.on('activate', () => {
@@ -151,13 +212,28 @@ app.whenReady().then(() => {
     window.webContents.once('did-finish-load', () => {
       window.webContents.executeJavaScript(
         "document.getElementById('anc-title').textContent",
-      ).then((title) => {
-        clearTimeout(deadline)
+      ).then(async (title) => {
         if (title !== 'ANC Microphone Studio') {
           console.error('desktop smoke test saw', title)
           app.exit(1)
           return
         }
+        console.log(`desktop launch: isPackaged=${app.isPackaged}`)
+        const expectedPython = path.join(process.resourcesPath, 'python', 'bin', 'python3')
+        if (!app.isPackaged || controller.pythonPath !== expectedPython) {
+          throw new Error('Installed app did not select its bundled Python runtime')
+        }
+        for (const script of ['aec_daemon.py', 'roku_client.py']) {
+          const result = JSON.parse(await controller._collect(script, ['--check-runtime'], 10000))
+          if (!result.ok) throw new Error(`${script} runtime check failed`)
+          console.log(`${script}: bundled runtime ready`)
+        }
+        const devices = await controller.listDevices()
+        if (devices.source !== 'sounddevice') {
+          throw new Error('Audio device scan did not use the bundled sounddevice backend')
+        }
+        console.log(`Audio device scan: ${devices.inputs.length} inputs, ${devices.outputs.length} outputs`)
+        clearTimeout(deadline)
         console.log('desktop smoke test passed')
         app.exit(0)
       }).catch((error) => {
@@ -174,9 +250,17 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', async (event) => {
-  if (controller && (controller.anc.running || controller.bridge.running)) {
+  if ((controller && (controller.anc.running || controller.bridge.running
+      || controller.micPreview.running || controller._previewDir)) || localMirrorServer) {
     event.preventDefault()
-    await controller.dispose()
+    const instance = controller
+    const srv = localMirrorServer
+    controller = null
+    localMirrorServer = null
+    await Promise.all([
+      instance ? instance.dispose() : Promise.resolve(),
+      srv ? srv.close() : Promise.resolve(),
+    ])
     app.quit()
   }
 })

@@ -1,0 +1,10 @@
+# Checked against PyPI JSON API on 2026-11-14. Exact pins include dependencies.
+sounddevice==0.5.6
+numpy==2.5.4
+cffi==2.1.1
+pycparser==3.12
+# WebRTC AEC3 echo canceller (livekit 1.2.1 wheel, checked 2026-11-14).
+livekit==1.2.1
+protobuf==7.36.2
+types-protobuf==7.35.1.20260906
+aiofiles==25.1.0

@@ -684,7 +684,7 @@ class Handler(BaseHTTPRequestHandler):
                         if target_client_id is not None:
                             shared['master_client_id']=target_client_id
                         else:
-                            others=[cid for cid in shared.get('clients',{}) if cid != client_id]
+                            others=[cid for cid in shared.get('clients',{}) if cid != client_id and not cid.startswith('ref-')]
                             if others:
                                 freshest=max(others,key=lambda cid: shared['clients'][cid].get('received_at_ms',0))
                                 shared['master_client_id']=freshest
@@ -717,8 +717,12 @@ class Handler(BaseHTTPRequestHandler):
                     clients[client_id]=dict(client)
                     stale=[key for key,value in clients.items() if received_at_ms-value.get('received_at_ms',0)>60000]
                     for key in stale: del clients[key]
-                    # First active client owns the baton until someone passes it.
-                    if shared.get('master_client_id') is None or shared['master_client_id'] not in clients:
+                    if shared.get('master_client_id') and shared['master_client_id'] not in clients:
+                        shared['master_client_id']=None
+                        shared['master_state']=None
+                    # First active human client owns the baton until someone passes it;
+                    # passive TV reference tabs (ref-*) never steal the baton.
+                    if not client_id.startswith('ref-') and shared.get('master_client_id') is None:
                         shared['master_client_id']=client_id
                     if client_id == shared['master_client_id']:
                         shared['master_state']={'client_id':client_id,'title_id':title,'app':app,'position_ms':round(position),'paused':paused,'received_at_ms':received_at_ms,'client_ms':body.get('client_ms')}
@@ -819,7 +823,7 @@ class Handler(BaseHTTPRequestHandler):
                     effective_lead_ms=round(roku_lead_ms + roku_one_way_ms)
                     start_ms=round(time.time()*1000)+round(lead_ms)
                     deadline=time.monotonic()+(lead_ms-effective_lead_ms)/1000
-                    scheduled={'id':secrets.token_urlsafe(12),'at_ms':start_ms,'state':'pending','generation':shared['generation'],'roku_lead_ms':roku_lead_ms,'roku_one_way_ms':roku_one_way_ms,'effective_lead_ms':effective_lead_ms,'verify':True}
+                    scheduled={'id':secrets.token_urlsafe(12),'at_ms':start_ms,'roku_position_ms':sample['position_ms'],'state':'pending','generation':shared['generation'],'roku_lead_ms':roku_lead_ms,'roku_one_way_ms':roku_one_way_ms,'effective_lead_ms':effective_lead_ms,'verify':True}
                     shared['scheduled']=scheduled
                     shared['sample']=None
                 threading.Thread(target=perform_scheduled_start,args=(scheduled,deadline),daemon=True).start()

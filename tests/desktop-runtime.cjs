@@ -18,6 +18,13 @@ try {
   configureRuntime({ packaged: true, userData: dir, env: overridden })
   assert.equal(overridden.ROKU_SYNC_ENV_FILE, '', 'explicit settings isolation is preserved')
   assert.equal(overridden.ROKU_SYNC_PYTHON, '/explicit/python')
+  const resources = path.join(dir, 'Resources')
+  const bundled = path.join(resources, 'python', 'bin', 'python3')
+  fs.mkdirSync(path.dirname(bundled), { recursive: true })
+  fs.writeFileSync(bundled, 'synthetic interpreter fixture')
+  const bundleEnv = { ROKU_SYNC_PYTHON: '/stale/external/python' }
+  configureRuntime({ packaged: true, resourcesPath: resources, userData: dir, env: bundleEnv })
+  assert.equal(bundleEnv.ROKU_SYNC_PYTHON, bundled, 'installed app must use its own bundled runtime')
   fs.writeFileSync(path.join(dir, 'settings.env'), 'SYNC_TOKEN=local-fixture-only\n')
   const childEnv = { ...process.env }
   delete childEnv.SYNC_TOKEN

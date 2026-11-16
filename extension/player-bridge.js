@@ -1,5 +1,10 @@
 // Runs in Netflix's page world. It receives no relay credentials.
 (() => {
+  const loc = typeof location !== 'undefined' ? location : (typeof window !== 'undefined' ? window.location : null);
+  if (loc && /roku-sync-ref/i.test(String(loc.hash || '') + String(loc.search || ''))) {
+    try { document.documentElement?.setAttribute('data-roku-sync-ref', '1'); } catch (e) {}
+    try { globalThis.sessionStorage?.setItem?.('rokuSyncRef', '1'); } catch (e) {}
+  }
   if (window.__rokuSyncPlayerBridge) return;
   window.__rokuSyncPlayerBridge = true;
   document.addEventListener('roku-sync-seek', event => {

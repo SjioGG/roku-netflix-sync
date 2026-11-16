@@ -189,6 +189,26 @@ It is stdlib-only Python 3 (`math`, `cmath`, `array`, `struct`, `wave`,
 `subprocess`, `argparse`) and uses `numpy` / `sounddevice` automatically when
 they are installed.
 
+### Roku Sync.app (recommended)
+
+The Mac app runs the canceller with WebRTC AEC3 (`aec_webrtc.py`, through the
+pinned `livekit` wheel) and takes the reference straight from a silent Chrome
+window with the Chrome Audio Tap. No BlackHole loopback is needed for the
+reference; the cleaned voice still goes to **BlackHole 2ch** for Messenger's mic.
+
+- The reference plays in its **own Chrome profile** (`~/Library/Application
+  Support/Roku Sync/Reference Chrome`). Only that window is tapped and muted, so
+  a Messenger call in your normal Chrome stays audible. First time: click **Set
+  up reference Chrome** in the app, sign in to Netflix in that window, load the
+  roku-sync extension there, and click **Connect Roku Sync app** in its popup.
+- The canceller needs Chrome to play slightly **ahead** of the TV. The daemon
+  measures the lead from the microphone every second, and the reference tab
+  trims itself to 200 ms ahead with small `playbackRate` changes. Measured on a
+  Roku TV: 4-6 dB of cancellation at 0-50 ms lead, 25-40 dB at 150-250 ms. Until
+  Chrome gets there, the daemon delays the mic instead (adds voice latency).
+- If the badge stays on "waiting for mic lock", the TV is probably playing
+  something else (YouTube autoplay, an ad) or is muted.
+
 ### 1. Install the virtual audio devices (once)
 
 ```sh
@@ -310,7 +330,7 @@ no `pip install`.
 
 ## Install as a Mac app
 
-To install the native app using an existing local Electron runtime:
+To install the native app using uv and an existing local Electron runtime:
 
 ```sh
 swift bin/render-app-icon.swift
@@ -319,11 +339,21 @@ python3 bin/install-mac-app.py
 
 Open **Roku Sync** from Applications or Spotlight, then keep it in the Dock if
 you want. No Terminal or npm is needed for normal use. The app contains its
-UI and Python scripts and uses the Mac's existing Python and audio tools.
+UI, standalone Python, PortAudio and audio libraries inside the signed bundle.
+The builder requires uv; the installed app requires neither uv, Homebrew Python,
+nor pip. uv downloads the pinned Python 3.14 distribution in
+`desktop/python-runtime.json` and installs the exact versions in
+`desktop/requirements-audio.txt` from PyPI. Both install and `--build-only`
+produce a self-contained app. An internet connection is required for the build.
+Before replacing the installed app, the builder launches the actual app in an
+isolated smoke test. It checks Electron's packaged status, both Python helpers
+and audio-device enumeration, without opening audio streams or scanning the LAN.
+Python 3.14.10 was checked against Astral's managed Python metadata on
+2026-11-14 using uv 0.10.9. Package pins were checked using PyPI's JSON API on
+2026-11-14: sounddevice 0.5.6, numpy 2.5.4, cffi 2.1.1 and pycparser 3.12.
 It opens with ANC and the Roku bridge stopped; start the feature you need.
 
-The installer keeps existing desktop settings and stores machine-local runtime
-paths and an initial private settings copy in
+The installer keeps existing desktop settings and stores an initial private settings copy in
 `~/Library/Application Support/Roku Sync/`, outside the signed app. Neither
 private settings nor credentials are embedded in the app bundle. Reinstalling
 preserves settings and keeps a recoverable previous app in ignored `dist/mac/`.
@@ -333,7 +363,8 @@ The desktop app does not currently update itself from the Chrome Web Store.
 The installer follows Electron's documented prebuilt-binary packaging method:
 https://www.electronjs.org/docs/latest/tutorial/application-distribution .
 It reuses the existing official runtime and signs the locally built bundle
-ad hoc; it does not download packages or notarize a public distribution.
+ad hoc; it does not notarize a public distribution. Building downloads the
+standalone Python distribution and pinned binary wheels.
 
 ## Desktop control center ([BEE-232](https://linear.app/beeros/issue/BEE-232))
 

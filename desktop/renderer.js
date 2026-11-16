@@ -48,12 +48,20 @@ function browserAdapter() {
     revealToken: () => call('POST', '/api/token/reveal'),
     saveConfig: async (patch) => unwrap(await call('POST', '/api/config', { patch })),
     refreshDevices: () => call('POST', '/api/devices/refresh').then(unwrap),
+    rescanAll: () => call('POST', '/api/devices/rescan').then(unwrap),
     startAnc: () => call('POST', '/api/anc/start').then(unwrap),
     stopAnc: () => call('POST', '/api/anc/stop').then(unwrap),
     runSelfTest: () => call('POST', '/api/anc/selftest').then(unwrap),
+    startMicPreview: (options) => call('POST', '/api/anc/preview/start', { options: options || {} }).then(unwrap),
+    stopMicPreview: () => call('POST', '/api/anc/preview/stop').then(unwrap),
+    getMicPreviewAudio: () => call('GET', '/api/anc/preview/audio'),
+    openReferenceChrome: () => call('POST', '/api/mirror/reference-chrome'),
+    launchMirror: (url, options) => call('POST', '/api/mirror/launch', Object.assign({ url }, options || {})),
+    openAudioCaptureSettings: async () => false,
     startBridge: () => call('POST', '/api/bridge/start').then(unwrap),
     stopBridge: () => call('POST', '/api/bridge/stop').then(unwrap),
     scanRokuDevices: () => call('POST', '/api/roku/scan').then(unwrap),
+    openLocalNetworkSettings: async () => false,
     pingServer: (options) => call('POST', '/api/ping', { options: options || {} }).then(unwrap),
     recentLogs: () => call('GET', '/api/logs'),
     copy: async (text) => {
@@ -109,6 +117,14 @@ const el = {
   warningBody: $('device-warning-body'),
   brew: $('brew-command'),
   copyBrew: $('copy-brew'),
+  mirrorUrl: $('mirror-url'),
+  launchMirror: $('launch-mirror'),
+  openReferenceChrome: $('open-reference-chrome'),
+  mirrorChip: $('mirror-chip'),
+  autoMirrorChrome: $('auto-mirror-chrome'),
+  mirrorStatus: $('mirror-status'),
+  refLevelValue: $('ref-level-value'),
+  refLevelBar: $('ref-level-bar'),
   delayValue: $('delay-value'),
   delayBar: $('delay-bar'),
   erleValue: $('erle-value'),
@@ -117,10 +133,19 @@ const el = {
   talkBar: $('talk-bar'),
   ancStatus: $('anc-status'),
   ancError: $('anc-error'),
+  openAudioCapture: $('open-audio-capture'),
   startAnc: $('start-anc'),
   stopAnc: $('stop-anc'),
   selftest: $('run-selftest'),
   selftestResult: $('selftest-result'),
+  previewStatus: $('preview-status'),
+  previewLevelBar: $('preview-level-bar'),
+  togglePreview: $('toggle-preview'),
+  playPreviewClean: $('play-preview-clean'),
+  playPreviewRaw: $('play-preview-raw'),
+  previewAudio: $('preview-audio'),
+  previewSummary: $('preview-summary'),
+  previewError: $('preview-error'),
   bridgeStatus: $('bridge-status'),
   bridgeError: $('bridge-error'),
   serverUrl: $('server-url'),
@@ -129,9 +154,9 @@ const el = {
   copyToken: $('copy-token'),
   tokenSource: $('token-source'),
   rokuUrl: $('roku-url'),
-  scanRoku: $('scan-roku'),
   rokuDeviceList: $('roku-device-list'),
   rokuScanSummary: $('roku-scan-summary'),
+  openLocalNetwork: $('open-local-network'),
   configPath: $('config-path'),
   rokuPlayer: $('roku-player'),
   rokuApp: $('roku-app'),
@@ -205,12 +230,15 @@ function renderDevices(state) {
   // A loopback must be a virtual device: plain speakers have no input side and
   // cannot carry the Chrome reference into the canceller.
   const loopbacks = outputs.concat(inputs).filter((entry) => entry.kind === 'virtual')
+  const outLoopbacks = outputs.filter((entry) => entry.kind === 'virtual')
+  const physicalMics = inputs.filter((entry) => !/^Chrome Audio Tap/i.test(entry.name || ''))
 
   const micName = state.anc.mic_device || recommended.mic_device
-  fillSelect(el.micSelect, inputs, micName, 'No microphone detected')
+  fillSelect(el.micSelect, physicalMics, micName, 'No microphone detected')
   fillSelect(el.refSelect, loopbacks, state.anc.ref_device || recommended.ref_device,
     'No virtual loopback installed')
-  fillSelect(el.outSelect, loopbacks, state.anc.out_device || recommended.out_device,
+  fillSelect(el.outSelect, outLoopbacks.length ? outLoopbacks : loopbacks,
+    state.anc.out_device || recommended.out_device,
     'No virtual output installed')
 
   const micEntry = inputs.find((entry) => entry.name === micName)
@@ -229,6 +257,45 @@ function renderDevices(state) {
   el.brew.textContent = BREW_COMMAND
 
   el.autoPick.checked = Boolean(state.config.autoPickSoundcard)
+  if (el.autoMirrorChrome) {
+    el.autoMirrorChrome.checked = state.config.autoMirrorChrome !== false
+  }
+}
+
+let manualMirrorNoticeUntil = 0
+function renderMirror(state) {
+  if (!el.mirrorChip) return
+  const mirror = state.mirror || {}
+  const st = mirror.state || 'idle'
+  if (st === 'synced') {
+    const pos = mirror.positionMs !== null && mirror.positionMs !== undefined
+      ? formatPosition(mirror.positionMs)
+      : '-'
+    const playState = mirror.paused ? 'Paused' : 'Playing'
+    const drift = Number.isFinite(mirror.driftMs)
+      ? ` · ${mirror.driftMs >= 0 ? '+' : ''}${mirror.driftMs} ms`
+      : ''
+    const anc = state.anc || {}
+    const lead = Number(anc.acoustic_lead_ms)
+    const echoLock = anc.running && anc.acoustic_lead_ms !== null && anc.acoustic_lead_ms !== undefined && Number.isFinite(lead)
+    setChip(el.mirrorChip, echoLock ? `Echo lock · ${playState}` : `Synced · ${playState}`, 'running')
+    if (Date.now() >= manualMirrorNoticeUntil) {
+      const lock = echoLock
+        ? ` Mic hears the TV ${Math.round(lead)} ms after Chrome (target 200 ms).`
+        : (anc.running ? ' Waiting for the mic to match TV audio. If this lasts, check the TV plays the same video (autoplay or an ad can switch it).' : '')
+      el.mirrorStatus.textContent = `Silent Chrome reference locked (${mirror.app || 'video'} ${mirror.titleId || ''} @ ${pos}${drift}).${lock}`
+    }
+  } else if (st === 'opening') {
+    setChip(el.mirrorChip, 'Syncing tab…', 'warn')
+    if (Date.now() >= manualMirrorNoticeUntil && mirror.detail) {
+      el.mirrorStatus.textContent = mirror.detail
+    }
+  } else if (st === 'needs-extension') {
+    setChip(el.mirrorChip, 'Check Chrome popup', 'warn')
+    if (mirror.detail) el.mirrorStatus.textContent = mirror.detail
+  } else {
+    setChip(el.mirrorChip, 'Idle', 'idle')
+  }
 }
 
 function renderAnc(state) {
@@ -238,6 +305,24 @@ function renderAnc(state) {
     error: ['Error', 'error'] }
   const [text, variant] = labels[anc.state] || ['Stopped', 'idle']
   setChip(el.ancStatus, text, variant)
+
+  const preview = state.micPreview || {}
+  const refDb = Number(preview.running ? (preview.refRmsDb ?? -90) : (anc.running ? (anc.ref_rms_db ?? -90) : -90))
+  if (anc.running || preview.running) {
+    if (refDb <= -65) {
+      el.refLevelValue.innerHTML = 'Silent'
+      el.refLevelBar.style.width = '0%'
+      el.refLevelBar.className = 'meter-fill warn'
+    } else {
+      el.refLevelValue.innerHTML = `${refDb.toFixed(0)} <small>dBFS</small>`
+      el.refLevelBar.style.width = `${Math.max(6, Math.min(100, ((refDb + 60) / 55) * 100))}%`
+      el.refLevelBar.className = 'meter-fill good'
+    }
+  } else {
+    el.refLevelValue.innerHTML = 'Idle'
+    el.refLevelBar.style.width = '0%'
+    el.refLevelBar.className = 'meter-fill accent'
+  }
 
   el.delayValue.innerHTML = `${Number(anc.delay_ms || 0).toFixed(1)} <small>ms</small>`
   const delayPct = Math.max(0, Math.min(100, (Number(anc.delay_ms || 0) / 600) * 100))
@@ -256,6 +341,12 @@ function renderAnc(state) {
   el.selftest.disabled = state.selfTest.running
   el.selftest.textContent = state.selfTest.running ? 'Running self-test...' : 'Run 4s DSP self-test'
 
+  const combinedAudioErr = `${anc.error || ''} ${(state.micPreview && state.micPreview.error) || ''}`
+  if (el.openAudioCapture) {
+    if (/System Audio Recording/i.test(combinedAudioErr)) el.openAudioCapture.classList.remove('hidden')
+    else el.openAudioCapture.classList.add('hidden')
+  }
+
   if (anc.error) {
     el.ancError.classList.remove('hidden')
     el.ancError.textContent = anc.error
@@ -269,6 +360,98 @@ function renderAnc(state) {
       + `ERLE ${Number(result.erle_db).toFixed(1)} dB, voice ${Number(result.near_end_preserved_db).toFixed(1)} dB`
   } else if (state.selfTest.error) {
     el.selftestResult.textContent = `Self-test failed: ${state.selfTest.error}`
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Discord-style mic preview                                                 */
+/* ------------------------------------------------------------------------- */
+let loadedPreviewClipId = null
+let activePreviewTrack = 'clean'
+let previewAudioTracks = { clean: null, raw: null }
+let previewRecording = false
+
+function dbToPercent(db) {
+  const numeric = Number(db)
+  if (!Number.isFinite(numeric)) return 0
+  return Math.max(0, Math.min(100, ((numeric + 60) / 60) * 100))
+}
+
+function selectPreviewTrack(track, autoPlay) {
+  const src = previewAudioTracks[track]
+  if (!src) return
+  activePreviewTrack = track
+  el.playPreviewClean.classList.toggle('active-track', track === 'clean')
+  el.playPreviewRaw.classList.toggle('active-track', track === 'raw')
+  el.previewAudio.src = src
+  el.previewAudio.classList.remove('hidden')
+  if (autoPlay && typeof el.previewAudio.play === 'function') {
+    Promise.resolve(el.previewAudio.play()).catch(() => {})
+  }
+}
+
+async function hydratePreviewAudio(clipId) {
+  if (!clipId || typeof api.getMicPreviewAudio !== 'function') return
+  try {
+    const audio = await api.getMicPreviewAudio()
+    if (!audio || audio.clipId !== clipId || !audio.cleanDataUrl) return
+    previewAudioTracks = { clean: audio.cleanDataUrl, raw: audio.rawDataUrl || null }
+    el.playPreviewClean.classList.remove('hidden')
+    if (audio.rawDataUrl) el.playPreviewRaw.classList.remove('hidden')
+    else el.playPreviewRaw.classList.add('hidden')
+    selectPreviewTrack('clean', true)
+  } catch (error) {
+    appendLog({ source: 'preview', line: error.message })
+  }
+}
+
+function renderPreview(state) {
+  const preview = state.micPreview || {}
+  const running = Boolean(preview.running)
+  previewRecording = running
+  el.togglePreview.textContent = running ? 'Stop & Play' : 'Test Mic (5s Preview)'
+  el.togglePreview.disabled = preview.phase === 'stopping'
+
+  if (running) {
+    const secs = (Number(preview.elapsedMs || 0) / 1000).toFixed(1)
+    const total = (Number(preview.totalMs || 5000) / 1000).toFixed(0)
+    setChip(el.previewStatus, `Recording ${secs}s / ${total}s`, 'warn')
+    el.previewLevelBar.style.width = `${dbToPercent(preview.micRmsDb)}%`
+    const refNote = Number(preview.refRmsDb ?? -90) > -65
+      ? `TV ref ${Number(preview.refRmsDb).toFixed(0)} dBFS`
+      : 'TV ref silent (play video unmuted in Chrome)'
+    el.previewSummary.textContent = `Mic ${Number(preview.micRmsDb ?? -90).toFixed(0)} dBFS · ${refNote}`
+  } else if (preview.error) {
+    setChip(el.previewStatus, 'Error', 'error')
+    el.previewLevelBar.style.width = '0%'
+  } else if (preview.result) {
+    const r = preview.result
+    setChip(el.previewStatus, activePreviewTrack === 'raw' ? 'Raw Mic' : 'ANC Ready', 'running')
+    el.previewLevelBar.style.width = `${dbToPercent(r.mic_peak_db)}%`
+    const dur = (Number(r.duration_ms || 0) / 1000).toFixed(1)
+    const peak = Number(r.mic_peak_db ?? -90)
+    const refPeak = Number(r.ref_peak_db ?? r.ref_rms_db ?? -90)
+    if (peak <= -65) {
+      el.previewSummary.textContent = `${dur}s captured, but mic looks silent (${peak.toFixed(1)} dBFS). Check macOS Microphone permission or input selection.`
+    } else if (refPeak <= -65) {
+      el.previewSummary.textContent = `${dur}s · Mic ${peak.toFixed(1)} dBFS · TV reference was silent! Play the matching video unmuted in Chrome so Roku Sync can subtract it.`
+    } else {
+      el.previewSummary.textContent = `${dur}s · Mic ${peak.toFixed(1)} dBFS · TV ref ${refPeak.toFixed(1)} dBFS · Delay ${Number(r.delay_ms || 0).toFixed(1)} ms · Suppression ${Number(r.suppression_db || r.erle_db || 0).toFixed(1)} dB`
+    }
+    if (preview.clipId && preview.clipId !== loadedPreviewClipId) {
+      loadedPreviewClipId = preview.clipId
+      hydratePreviewAudio(preview.clipId)
+    }
+  } else {
+    setChip(el.previewStatus, 'Ready', 'idle')
+    el.previewLevelBar.style.width = '0%'
+  }
+
+  if (preview.error) {
+    el.previewError.classList.remove('hidden')
+    el.previewError.textContent = preview.error
+  } else {
+    el.previewError.classList.add('hidden')
   }
 }
 
@@ -344,7 +527,9 @@ function deviceMetaLine(device) {
 function renderRokuDevices(state) {
   const devices = Array.isArray(state.rokuDevices) ? state.rokuDevices : []
   const current = (state.config && state.config.rokuUrl) || el.rokuUrl.value
-  const signature = JSON.stringify([current, devices.map((device) => [device.url, device.label,
+  const blocked = !devices.length && Boolean(state.rokuLocalNetworkBlocked)
+  const signature = JSON.stringify([current, state.lastRokuScan, state.rokuScanError, blocked,
+    devices.map((device) => [device.url, device.label,
     device.model_number, device.network_name, device.active_app, device.latency_ms,
     device.supports_airplay])])
   if (signature === renderedDeviceSignature) return
@@ -406,14 +591,21 @@ function renderRokuDevices(state) {
     el.rokuDeviceList.appendChild(card)
   }
 
+  if (el.openLocalNetwork) {
+    if (blocked) el.openLocalNetwork.classList.remove('hidden')
+    else el.openLocalNetwork.classList.add('hidden')
+  }
+
   if (devices.length) {
     el.rokuScanSummary.textContent = `${devices.length} Roku${devices.length === 1 ? '' : 's'} on this LAN`
   } else if (state.rokuScanError) {
     el.rokuScanSummary.textContent = `Scan failed: ${state.rokuScanError}`
+  } else if (blocked) {
+    el.rokuScanSummary.textContent = 'macOS blocked Local Network access for Roku Sync. Enable Roku Sync in System Settings > Privacy & Security > Local Network, then click Rescan devices.'
   } else if (state.lastRokuScan) {
-    el.rokuScanSummary.textContent = 'No Roku answered on this LAN. Check the TV is on and ECP is enabled.'
+    el.rokuScanSummary.textContent = 'No Roku answered. Check the TV is on, both devices share a LAN, Roku Sync has macOS Local Network access, and Roku Control by mobile apps is enabled.'
   } else {
-    el.rokuScanSummary.textContent = 'Scan the LAN to pick a Roku the way AirPlay lists speakers.'
+    el.rokuScanSummary.textContent = 'Click Rescan devices to pick a Roku on this LAN the way AirPlay lists speakers.'
   }
 }
 
@@ -477,11 +669,13 @@ function renderState(state) {
   if (!state) return
   renderConfig(state)
   renderDevices(state)
+  renderMirror(state)
   renderAnc(state)
+  renderPreview(state)
   renderBridge(state)
   renderRokuDevices(state)
   renderPing(state)
-  const busy = state.anc.running || state.bridge.running
+  const busy = state.anc.running || state.bridge.running || Boolean(state.micPreview && state.micPreview.running)
   setChip(el.connection, busy ? 'Active' : 'Idle', busy ? 'running' : 'idle')
 }
 
@@ -520,6 +714,9 @@ const saveConfig = async (patch) => {
 }
 
 el.autoPick.addEventListener('change', () => saveConfig({ autoPickSoundcard: el.autoPick.checked }))
+if (el.autoMirrorChrome) {
+  el.autoMirrorChrome.addEventListener('change', () => saveConfig({ autoMirrorChrome: el.autoMirrorChrome.checked }))
+}
 el.micSelect.addEventListener('change', () => saveConfig({ preferredMicDevice: el.micSelect.value }))
 el.refSelect.addEventListener('change', () => saveConfig({ preferredRefDevice: el.refSelect.value }))
 el.outSelect.addEventListener('change', () => saveConfig({ preferredOutDevice: el.outSelect.value }))
@@ -563,16 +760,49 @@ el.copyToken.addEventListener('click', async () => {
   }
 })
 
-el.scanRoku.addEventListener('click', async () => {
-  el.scanRoku.disabled = true
-  el.scanRoku.textContent = 'Scanning...'
+el.openLocalNetwork.addEventListener('click', async () => {
+  if (typeof api.openLocalNetworkSettings === 'function') {
+    await api.openLocalNetworkSettings()
+  }
+})
+el.openAudioCapture.addEventListener('click', async () => {
+  if (typeof api.openAudioCaptureSettings === 'function') {
+    await api.openAudioCaptureSettings()
+  }
+})
+if (el.openReferenceChrome) {
+  el.openReferenceChrome.addEventListener('click', async () => {
+    if (typeof api.openReferenceChrome !== 'function') return
+    const res = await api.openReferenceChrome()
+    manualMirrorNoticeUntil = Date.now() + 8000
+    el.mirrorStatus.textContent = res && res.opened
+      ? 'Opened the reference Chrome window. Sign in to Netflix there and add the roku-sync extension once.'
+      : 'Could not open Google Chrome.'
+  })
+}
+el.launchMirror.addEventListener('click', async () => {
+  const url = el.mirrorUrl.value.trim()
+  if (!url) {
+    el.mirrorStatus.textContent = 'Paste a YouTube or Netflix watch URL first.'
+    return
+  }
+  el.launchMirror.disabled = true
+  el.launchMirror.textContent = 'Launching...'
   try {
-    renderState(await api.scanRokuDevices())
+    const res = await api.launchMirror(url)
+    if (res && res.snapshot) renderState(res.snapshot)
+    const parts = []
+    if (res && res.rokuLaunched) parts.push(`launched ${res.appName} on Roku`)
+    else if (res && res.rokuError) parts.push(`Roku: ${res.rokuError}`)
+    if (res && res.reusedTab) parts.push('synced existing silent Chrome tab')
+    else if (res && res.chromeOpened) parts.push('opened synced silent Chrome tab')
+    manualMirrorNoticeUntil = Date.now() + 3000
+    el.mirrorStatus.textContent = parts.length ? parts.join(' + ') + '.' : 'Mirror launched.'
   } catch (error) {
-    appendLog({ source: 'roku-scan', line: error.message })
+    el.mirrorStatus.textContent = error.message || String(error)
   } finally {
-    el.scanRoku.disabled = false
-    el.scanRoku.textContent = 'Scan LAN for Rokus'
+    el.launchMirror.disabled = false
+    el.launchMirror.textContent = 'Play on Roku + Chrome'
   }
 })
 
@@ -601,12 +831,34 @@ el.pingJapan.addEventListener('click', async () => {
 
 el.refresh.addEventListener('click', async () => {
   el.refresh.disabled = true
+  el.refresh.textContent = 'Scanning...'
   try {
-    renderState(await api.refreshDevices())
+    const next = typeof api.rescanAll === 'function'
+      ? await api.rescanAll()
+      : (await Promise.all([api.refreshDevices(), api.scanRokuDevices()]))[1]
+    renderState(next)
+  } catch (error) {
+    appendLog({ source: 'scan', line: error.message })
   } finally {
     el.refresh.disabled = false
+    el.refresh.textContent = 'Rescan devices'
   }
 })
+
+el.togglePreview.addEventListener('click', async () => {
+  try {
+    if (previewRecording) {
+      renderState(await api.stopMicPreview())
+    } else {
+      const next = await api.startMicPreview({ seconds: 5 })
+      renderState(next && next.snapshot ? next.snapshot : next)
+    }
+  } catch (error) {
+    appendLog({ source: 'preview', line: error.message })
+  }
+})
+el.playPreviewClean.addEventListener('click', () => selectPreviewTrack('clean', true))
+el.playPreviewRaw.addEventListener('click', () => selectPreviewTrack('raw', true))
 
 el.startAnc.addEventListener('click', async () => {
   renderState(await api.startAnc())

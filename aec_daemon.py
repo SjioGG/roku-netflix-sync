@@ -31,14 +31,21 @@ on a bare ``python3``:
 import argparse
 import array
 import cmath
+import contextlib
 import json
 import math
 import operator
+import os
+from pathlib import Path
 import platform
+import queue
 import shutil
+import signal
 import struct
 import subprocess
 import sys
+import threading
+import time
 import wave
 
 try:  # Optional fast path: only used when already installed.
@@ -78,6 +85,20 @@ def _energy(values):
 
 def _db(ratio):
     return 10.0 * math.log10(ratio) if ratio > 0 else -999.0
+
+
+def _rms_db(samples, floor=-90.0):
+    if not samples:
+        return floor
+    rms = math.sqrt(_energy(samples) / float(len(samples)))
+    return max(floor, round(20.0 * math.log10(max(rms, 1e-6)), 1))
+
+
+def _peak_db(samples, floor=-90.0):
+    if not samples:
+        return floor
+    peak = max(abs(value) for value in samples)
+    return max(floor, round(20.0 * math.log10(max(peak, 1e-6)), 1))
 
 
 # ---------------------------------------------------------------------------
@@ -688,9 +709,42 @@ EXTERNAL_DEVICE_HINTS = ('scarlett', 'focusrite', 'usb', 'sound blaster', 'sound
 BLACKHOLE_2CH_NAME = 'BlackHole 2ch'
 BLACKHOLE_16CH_NAME = 'BlackHole 16ch'
 ZOOM_DEVICE_NAME = 'ZoomAudioDevice'
+CHROME_TAP_DEVICE_NAME = 'Chrome Audio Tap (Auto-mute in room)'
+CHROME_TAP_ALIASES = frozenset({
+    'chrome audio tap (auto-mute in room)',
+    'chrome audio tap',
+    'chrome-tap',
+    'chrometap',
+})
 
 # Reused verbatim by the desktop UI, so keep the two copies in step.
 BLACKHOLE_INSTALL_COMMAND = 'brew install --cask blackhole-2ch'
+
+
+def is_chrome_tap_device(name):
+    """True when ``name`` selects the macOS CoreAudio Google Chrome process tap."""
+    text = (name or '').strip().lower()
+    return text in CHROME_TAP_ALIASES or text.startswith('chrome audio tap')
+
+
+def chrome_tap_binary_path():
+    """Locate the compiled ``chrome-audio-tap`` helper when built or packaged."""
+    override = os.environ.get('ROKU_SYNC_CHROME_TAP')
+    if override is not None:
+        if override == '':
+            return None
+        candidate = Path(override)
+        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / 'desktop/bin/chrome-audio-tap',
+        here.parent / 'bin/chrome-audio-tap',
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    which = shutil.which('chrome-audio-tap')
+    return which if which else None
 
 
 def classify_device(name, transport=None):
@@ -700,6 +754,8 @@ def classify_device(name, transport=None):
     picked as the physical microphone by accident, and an external soundcard
     outranks the built-in mic whenever one is plugged in.
     """
+    if name == CHROME_TAP_DEVICE_NAME:
+        return 'virtual'
     lowered = (name or '').lower()
     for hint in VIRTUAL_DEVICE_HINTS:
         if hint in lowered:
@@ -808,6 +864,10 @@ def discover_audio_devices(module=None, preferred=None, allow_external=True):
                                'channels': device['outputs']})
         if inputs or outputs:
             source = 'system_profiler'
+    if module is None and chrome_tap_binary_path():
+        if not any(entry.get('name') == CHROME_TAP_DEVICE_NAME for entry in inputs):
+            inputs.insert(0, {'index': -1, 'name': CHROME_TAP_DEVICE_NAME,
+                              'kind': 'virtual', 'channels': 1})
     devices = {'inputs': inputs, 'outputs': outputs, 'source': source}
     devices['recommended'] = auto_select_devices(devices, preferred,
                                                  allow_external=allow_external)
@@ -883,10 +943,12 @@ def auto_select_devices(devices, preferred=None, allow_external=True):
                      'check System Settings > Sound > Input.')
 
     # -- virtual reference and virtual microphone output ---------------------
+    chrome_tap = _find_device(inputs, CHROME_TAP_DEVICE_NAME)
     virtual_names = []
     for entry in inputs + outputs:
         if entry.get('kind') == 'virtual' and entry.get('name') not in virtual_names:
             virtual_names.append(entry.get('name'))
+    output_virtual_names = [name for name in virtual_names if name != CHROME_TAP_DEVICE_NAME]
 
     def virtual_by_name(name):
         return _find_device(outputs, name) or _find_device(inputs, name)
@@ -905,13 +967,33 @@ def auto_select_devices(devices, preferred=None, allow_external=True):
 
     preferred_out = _find_device(outputs, preferred.get('out_device')) \
         or _find_device(inputs, preferred.get('out_device'))
+    if preferred_out and preferred_out.get('name') == CHROME_TAP_DEVICE_NAME:
+        preferred_out = None
     out_device = preferred_out.get('name') if preferred_out else None
     out_source = 'preferred' if out_device else None
     if preferred.get('out_device') and preferred_out is None:
         notes.append('Preferred output device %r is not connected; using an automatic pick.'
                      % preferred['out_device'])
 
-    if len(virtual_names) >= 2:
+    if chrome_tap is not None:
+        if ref_device is None:
+            ref_device = CHROME_TAP_DEVICE_NAME
+            ref_source = 'tap'
+        if out_device is None and output_virtual_names:
+            fallback = zoom or blackhole_2ch or blackhole_16ch
+            if fallback is None:
+                fallback = next((entry for entry in outputs + inputs
+                                 if entry.get('name') in output_virtual_names), None)
+            out_device = fallback.get('name') if fallback else None
+            out_source = 'virtual' if out_device else None
+        if ref_device and out_device:
+            notes.append('Reference input uses %s; the Messenger virtual microphone uses %s.'
+                         % (ref_device, out_device))
+        elif not output_virtual_names:
+            notes.append('No virtual microphone output device found. Install BlackHole 2ch (%s) '
+                         'so Discord and Messenger can select the cleaned voice.'
+                         % BLACKHOLE_INSTALL_COMMAND)
+    elif len(virtual_names) >= 2:
         if ref_device is None:
             fallback = blackhole_2ch or zoom
             if fallback is None:
@@ -1045,9 +1127,254 @@ def _install_hint():
             '  # Messenger  -> ZoomAudioDevice / BlackHole 16ch output of this daemon')
 
 
+class _ChromeTapInputStream:
+    """sounddevice-shaped context manager backed by ``chrome-audio-tap``."""
+
+    def __init__(self, sample_rate=DEFAULT_SAMPLE_RATE, block_size=DEFAULT_BLOCK_SIZE,
+                 mute=True, binary=None):
+        self.binary = binary or chrome_tap_binary_path()
+        if not self.binary:
+            raise RuntimeError('chrome-audio-tap helper was not found')
+        self.sample_rate = int(sample_rate)
+        self.block_size = int(block_size)
+        self.mute = bool(mute)
+        self.process = None
+        self._stderr_lines = []
+
+    def __enter__(self):
+        cmd = [
+            self.binary,
+            '--sample-rate', str(self.sample_rate),
+            '--block-size', str(self.block_size),
+            '--mute' if self.mute else '--no-mute',
+        ]
+        # Lets a test browser (Chrome for Testing) be tapped without muting
+        # the everyday Chrome instance.
+        for prefix in filter(None, os.environ.get('ROKU_SYNC_TAP_BUNDLE_PREFIX', '').split(',')):
+            cmd += ['--bundle-prefix', prefix.strip()]
+        # Only the dedicated reference Chrome profile is tapped and muted, so a
+        # call in everyday Chrome stays audible.
+        profile = os.environ.get('ROKU_SYNC_REFERENCE_PROFILE', '').strip()
+        if profile:
+            cmd += ['--profile-dir', profile]
+        self.process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        def drain_stderr():
+            try:
+                for raw in self.process.stderr:
+                    text = raw.decode('utf-8', 'replace').strip()
+                    if text:
+                        self._stderr_lines.append(text)
+            except (OSError, ValueError):
+                return
+
+        threading.Thread(target=drain_stderr, daemon=True).start()
+        return self
+
+    def read(self, frames):
+        if self.process is None or self.process.stdout is None:
+            return ([[0.0]] * frames, False)
+        wanted = int(frames) * 4
+        chunks = []
+        remaining = wanted
+        while remaining > 0:
+            chunk = self.process.stdout.read(remaining)
+            if not chunk:
+                code = self.process.poll()
+                if code not in (None, 0):
+                    detail = self._stderr_lines[-1] if self._stderr_lines else ('exit code %s' % code)
+                    try:
+                        parsed = json.loads(detail)
+                        if isinstance(parsed, dict) and parsed.get('error'):
+                            detail = parsed['error']
+                    except ValueError:
+                        pass
+                    raise RuntimeError(detail)
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw_bytes = b''.join(chunks)
+        if len(raw_bytes) < wanted:
+            raw_bytes += b'\x00' * (wanted - len(raw_bytes))
+        values = struct.unpack('<%df' % int(frames), raw_bytes)
+        return ([[value] for value in values], False)
+
+    def __exit__(self, *args):
+        proc = self.process
+        self.process = None
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+        return False
+
+
+def _open_reference_stream(ref_device, sample_rate, block_size):
+    if ref_device is None:
+        return contextlib.nullcontext(None)
+    if is_chrome_tap_device(ref_device):
+        return _ChromeTapInputStream(sample_rate=sample_rate, block_size=block_size, mute=True)
+    return _sd.InputStream(device=ref_device, channels=1, samplerate=sample_rate,
+                           blocksize=block_size, dtype='float32')
+
+
+class _PreviewRecorder:
+    """In-session recorder that tees raw + ANC-cleaned frames into WAV files."""
+
+    def __init__(self, clip_id, sample_rate, seconds, clean_wav, raw_wav,
+                 json_output=False, devices=None):
+        self.id = str(clip_id or 'preview')
+        self.sample_rate = int(sample_rate)
+        self.total_samples = max(1, int(round(float(seconds) * self.sample_rate)))
+        self.clean_wav = clean_wav
+        self.raw_wav = raw_wav
+        self.json_output = bool(json_output)
+        self.devices = dict(devices or {})
+        self.ref_samples = []
+        self.raw_samples = []
+        self.clean_samples = []
+        self._blocks = 0
+        self.done = False
+
+    def emit_start(self):
+        if self.json_output:
+            print(json.dumps(dict({
+                'event': 'preview_start',
+                'id': self.id,
+                'sample_rate': self.sample_rate,
+                'total_ms': round(self.total_samples * 1000.0 / self.sample_rate),
+            }, **self.devices)), flush=True)
+
+    def add_block(self, mic_block, clean_block, stats, ref_block=None):
+        if self.done:
+            return False
+        remaining = self.total_samples - len(self.clean_samples)
+        take = min(len(clean_block), remaining)
+        if ref_block is not None:
+            self.ref_samples.extend(ref_block[:take])
+        self.raw_samples.extend(mic_block[:take])
+        self.clean_samples.extend(clean_block[:take])
+        self._blocks += 1
+        if self.json_output and (self._blocks % 4 == 0 or len(self.clean_samples) >= self.total_samples):
+            print(json.dumps({
+                'event': 'preview_progress',
+                'id': self.id,
+                'elapsed_ms': round(len(self.clean_samples) * 1000.0 / self.sample_rate),
+                'total_ms': round(self.total_samples * 1000.0 / self.sample_rate),
+                'ref_rms_db': _rms_db(ref_block[:take]) if ref_block is not None else -90.0,
+                'mic_rms_db': _rms_db(mic_block[:take]),
+                'clean_rms_db': _rms_db(clean_block[:take]),
+                'erle_db': stats.get('erle_db', 0.0),
+                'delay_ms': stats.get('delay_ms', 0.0),
+            }), flush=True)
+        if len(self.clean_samples) >= self.total_samples:
+            self.finish(stats)
+            return True
+        return False
+
+    def finish(self, stats, clean_override=None):
+        if self.done:
+            return None
+        self.done = True
+        clean = self.clean_samples if clean_override is None else clean_override
+        raw = self.raw_samples
+        ref = self.ref_samples
+        if self.clean_wav:
+            write_wav(self.clean_wav, clean, self.sample_rate)
+        if self.raw_wav:
+            write_wav(self.raw_wav, raw, self.sample_rate)
+        mic_energy = _energy(raw)
+        clean_energy = _energy(clean)
+        achieved_db = round(_db((mic_energy + 1e-12) / (clean_energy + 1e-12)), 1) if raw else 0.0
+        payload = dict({
+            'event': 'preview_done',
+            'id': self.id,
+            'duration_ms': round(len(clean) * 1000.0 / self.sample_rate),
+            'sample_rate': self.sample_rate,
+            'samples': len(clean),
+            'ref_rms_db': _rms_db(ref),
+            'ref_peak_db': _peak_db(ref),
+            'mic_rms_db': _rms_db(raw),
+            'mic_peak_db': _peak_db(raw),
+            'clean_rms_db': _rms_db(clean),
+            'clean_peak_db': _peak_db(clean),
+            'suppression_db': max(0.0, achieved_db),
+            'erle_db': stats.get('erle_db', 0.0),
+            'delay_ms': stats.get('delay_ms', 0.0),
+            'confidence': stats.get('confidence', 0.0),
+            'clean_wav': self.clean_wav,
+            'raw_wav': self.raw_wav,
+        }, **self.devices)
+        if self.json_output:
+            print(json.dumps(payload), flush=True)
+        return payload
+
+
+def _start_command_queue(command_stream, json_output):
+    commands = queue.SimpleQueue()
+    source = command_stream
+    if source is None and json_output and sys.stdin is not None:
+        try:
+            if not sys.stdin.closed and not sys.stdin.isatty():
+                source = sys.stdin
+        except (OSError, ValueError):
+            source = None
+    if source is None:
+        return commands
+
+    def reader():
+        try:
+            for line in source:
+                text = (line or '').strip()
+                if not text or not text.startswith('{'):
+                    continue
+                try:
+                    commands.put(json.loads(text))
+                except ValueError:
+                    continue
+        except (OSError, ValueError):
+            return
+
+    if command_stream is not None:
+        # Drain synchronous in-memory streams up front so short test loops see
+        # queued commands on frame 1 without racing thread scheduling.
+        if hasattr(command_stream, 'getvalue'):
+            reader()
+            return commands
+    threading.Thread(target=reader, daemon=True).start()
+    return commands
+
+
+def make_live_canceller(sample_rate, engine='auto', **kwargs):
+    """WebRTC AEC3 when its runtime is installed, else the NLMS fallback."""
+    if engine in ('auto', 'webrtc'):
+        try:
+            import aec_webrtc
+        except ImportError:
+            aec_webrtc = None
+        if aec_webrtc is not None and aec_webrtc.available():
+            return aec_webrtc.WebRtcEchoCanceller(sample_rate=sample_rate)
+        if engine == 'webrtc':
+            raise RuntimeError('WebRTC AEC needs the livekit package; reinstall Roku Sync')
+    return AcousticEchoCanceller(sample_rate=sample_rate, **kwargs)
+
+
 def run_live(ref_device=None, mic_device=None, out_device=None,
              sample_rate=DEFAULT_SAMPLE_RATE, block_size=DEFAULT_BLOCK_SIZE,
-             report_every=4, auto=True, json_output=False, preferred=None,
+             report_every=None, auto=True, json_output=False, preferred=None,
              allow_external=True, **kwargs):
     """Real-time loop: read reference + mic, write the cleaned voice.
 
@@ -1055,6 +1382,7 @@ def run_live(ref_device=None, mic_device=None, out_device=None,
     unless ``auto`` is false, so ``--live`` alone works on a fresh Mac with a
     USB soundcard and one virtual device installed.
     """
+    command_stream = kwargs.pop('command_stream', None)
     if _sd is None:
         raise RuntimeError(_install_hint())
     notes = []
@@ -1065,9 +1393,14 @@ def run_live(ref_device=None, mic_device=None, out_device=None,
         mic_device = mic_device if mic_device is not None else recommendation['mic_device']
         out_device = out_device if out_device is not None else recommendation['out_device']
         notes = recommendation['notes']
-    aec = AcousticEchoCanceller(sample_rate=sample_rate, **kwargs)
+    if report_every is None:
+        # About four telemetry lines a second whatever the block size.
+        report_every = max(1, int(round(0.25 * sample_rate / max(1, block_size))))
+    aec = make_live_canceller(sample_rate, kwargs.pop('engine', 'auto'), **kwargs)
     devices = {'mic_device': mic_device, 'ref_device': ref_device,
                'out_device': out_device}
+    commands = _start_command_queue(command_stream, json_output)
+    preview = None
     if json_output:
         print(json.dumps(dict({'event': 'start'}, sample_rate=sample_rate,
                               block_size=block_size, notes=notes, **devices)),
@@ -1076,8 +1409,7 @@ def run_live(ref_device=None, mic_device=None, out_device=None,
         for note in notes:
             print('note: %s' % note)
     streams = [
-        _sd.InputStream(device=ref_device, channels=1, samplerate=sample_rate,
-                        blocksize=block_size, dtype='float32'),
+        _open_reference_stream(ref_device, sample_rate, block_size),
         _sd.InputStream(device=mic_device, channels=1, samplerate=sample_rate,
                         blocksize=block_size, dtype='float32'),
         _sd.OutputStream(device=out_device, channels=1, samplerate=sample_rate,
@@ -1088,18 +1420,47 @@ def run_live(ref_device=None, mic_device=None, out_device=None,
         print('AEC live: ref=%s mic=%s out=%s rate=%d block=%d'
               % (ref_device, mic_device, out_device, sample_rate, block_size))
     try:
-        with reference, microphone, speaker:
+        with reference as ref_stream, microphone, speaker:
             frames = 0
             while True:
-                ref_block, _ = reference.read(block_size)
+                while not commands.empty():
+                    cmd = commands.get_nowait()
+                    action = cmd.get('cmd')
+                    if action == 'preview':
+                        if preview is not None and not preview.done:
+                            preview.finish(aec.stats())
+                        preview = _PreviewRecorder(
+                            clip_id=cmd.get('id') or 'preview',
+                            sample_rate=sample_rate,
+                            seconds=float(cmd.get('seconds') or 5.0),
+                            clean_wav=cmd.get('clean_wav'),
+                            raw_wav=cmd.get('raw_wav'),
+                            json_output=json_output,
+                            devices=devices,
+                        )
+                        preview.emit_start()
+                    elif action == 'preview_stop' and preview is not None and not preview.done:
+                        preview.finish(aec.stats())
+                        preview = None
+                if ref_stream is not None:
+                    ref_block, _ = ref_stream.read(block_size)
+                    ref_samples = [frame[0] for frame in ref_block]
+                else:
+                    ref_samples = [0.0] * block_size
                 mic_block, _ = microphone.read(block_size)
-                clean, stats = aec.process_frame([frame[0] for frame in ref_block],
-                                                 [frame[0] for frame in mic_block])
+                mic_samples = [frame[0] for frame in mic_block]
+                clean, stats = aec.process_frame(ref_samples, mic_samples)
                 speaker.write(array.array('f', clean))
+                if preview is not None and not preview.done:
+                    if preview.add_block(mic_samples, clean, stats, ref_block=ref_samples):
+                        preview = None
                 frames += 1
-                if report_every and frames % report_every == 0:
+                if report_every and (frames == 1 or frames % report_every == 0):
                     if json_output:
-                        print(json.dumps(dict({'event': 'telemetry'}, **stats, **devices)),
+                        print(json.dumps(dict({'event': 'telemetry',
+                                               'ref_rms_db': _rms_db(ref_samples),
+                                               'mic_rms_db': _rms_db(mic_samples)},
+                                              **stats, **devices)),
                               flush=True)
                     else:
                         print('delay %7.1f ms (conf %.2f)  ERLE %5.1f dB%s'
@@ -1108,9 +1469,110 @@ def run_live(ref_device=None, mic_device=None, out_device=None,
     except KeyboardInterrupt:
         pass
     finally:
+        if preview is not None and not preview.done and preview.clean_samples:
+            preview.finish(aec.stats())
         if json_output:
             print(json.dumps(dict({'event': 'stop'}, **aec.stats(), **devices)), flush=True)
     return aec.stats()
+
+
+def run_preview(clean_wav, raw_wav=None, seconds=5.0, clip_id='preview',
+                ref_device=None, mic_device=None, sample_rate=DEFAULT_SAMPLE_RATE,
+                block_size=DEFAULT_BLOCK_SIZE, auto=True, json_output=False,
+                preferred=None, allow_external=True, **kwargs):
+    """Capture a short Discord-style preview clip through the real ANC pipeline."""
+    if _sd is None:
+        raise RuntimeError(_install_hint())
+    if auto:
+        recommendation = resolve_live_devices(preferred,
+                                             allow_external=allow_external)[0]
+        ref_device = ref_device if ref_device is not None else recommendation['ref_device']
+        mic_device = mic_device if mic_device is not None else recommendation['mic_device']
+    if mic_device is None:
+        raise RuntimeError('No microphone detected. Plug in a mic or check System Settings > Sound > Input.')
+    devices = {'mic_device': mic_device, 'ref_device': ref_device}
+    live_aec = AcousticEchoCanceller(sample_rate=sample_rate, **kwargs)
+    recorder = _PreviewRecorder(
+        clip_id=clip_id,
+        sample_rate=sample_rate,
+        seconds=seconds,
+        clean_wav=clean_wav,
+        raw_wav=raw_wav,
+        json_output=json_output,
+        devices=devices,
+    )
+    stop_requested = [False]
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _request_stop(_signum, _frame):
+        stop_requested[0] = True
+
+    signal.signal(signal.SIGTERM, _request_stop)
+    all_ref = []
+    microphone = _sd.InputStream(device=mic_device, channels=1, samplerate=sample_rate,
+                                 blocksize=block_size, dtype='float32')
+    reference = _open_reference_stream(ref_device, sample_rate, block_size)
+    recorder.emit_start()
+    try:
+        with reference as ref_stream, microphone as mic_stream:
+            while not recorder.done and not stop_requested[0]:
+                mic_block, _ = mic_stream.read(block_size)
+                mic_samples = [frame[0] for frame in mic_block]
+                if ref_stream is not None:
+                    ref_block, _ = ref_stream.read(block_size)
+                    ref_samples = [frame[0] for frame in ref_block]
+                else:
+                    ref_samples = [0.0] * len(mic_samples)
+                all_ref.extend(ref_samples)
+                clean, stats = live_aec.process_frame(ref_samples, mic_samples)
+                # Hold off the auto-finish inside add_block until steady-state pass completes.
+                remaining = recorder.total_samples - len(recorder.clean_samples)
+                take = min(len(clean), remaining)
+                recorder.ref_samples.extend(ref_samples[:take])
+                recorder.raw_samples.extend(mic_samples[:take])
+                recorder.clean_samples.extend(clean[:take])
+                recorder._blocks += 1
+                if json_output and (recorder._blocks % 4 == 0 or len(recorder.clean_samples) >= recorder.total_samples):
+                    print(json.dumps({
+                        'event': 'preview_progress',
+                        'id': recorder.id,
+                        'elapsed_ms': round(len(recorder.clean_samples) * 1000.0 / sample_rate),
+                        'total_ms': round(recorder.total_samples * 1000.0 / sample_rate),
+                        'ref_rms_db': _rms_db(ref_samples[:take]),
+                        'mic_rms_db': _rms_db(mic_samples[:take]),
+                        'clean_rms_db': _rms_db(clean[:take]),
+                        'erle_db': stats.get('erle_db', 0.0),
+                        'delay_ms': stats.get('delay_ms', 0.0),
+                    }), flush=True)
+                if len(recorder.clean_samples) >= recorder.total_samples:
+                    break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+    raw_captured = recorder.raw_samples
+    ref_captured = all_ref[:len(raw_captured)]
+    final_clean = recorder.clean_samples
+    final_stats = live_aec.stats()
+    # In standalone preview the filter starts cold; if the clip contained real
+    # reference audio that locked a room delay, re-run from the converged state
+    # so the first second of the playback preview reflects steady-state ANC too.
+    if ref_device is not None and len(raw_captured) >= block_size and live_aec.confidence >= live_aec.delay_confidence:
+        steady_aec = AcousticEchoCanceller(sample_rate=sample_rate, **kwargs)
+        steady_aec.delay_samples = live_aec.delay_samples
+        steady_aec.confidence = live_aec.confidence
+        steady_aec.weights = list(live_aec.weights)
+        steady_aec._locked = live_aec._locked
+        steady_aec._adaptive_mu = max(live_aec._adaptive_mu, 0.08)
+        steady_clean = []
+        for start in range(0, len(raw_captured), block_size):
+            block, _ = steady_aec.process_frame(ref_captured[start:start + block_size],
+                                                raw_captured[start:start + block_size])
+            steady_clean.extend(block)
+        final_clean = steady_clean
+        final_stats = steady_aec.stats()
+    return recorder.finish(final_stats, clean_override=final_clean)
 
 
 class _PipeReader:
@@ -1305,6 +1767,8 @@ def run_selftest(sample_rate=8000, seconds=4.0, delay_ms=185.0, frame_size=512,
 def build_parser():
     parser = argparse.ArgumentParser(
         description='Acoustic echo canceller that removes Roku TV audio from the MacBook mic.')
+    parser.add_argument('--check-runtime', action='store_true',
+                        help='check audio libraries without opening devices')
     parser.add_argument('--list-devices', action='store_true',
                         help='list audio devices and exit')
     parser.add_argument('--auto', action='store_true',
@@ -1313,6 +1777,16 @@ def build_parser():
     parser.add_argument('--mic-wav', help='microphone WAV (voice + TV room echo)')
     parser.add_argument('--out-wav', help='destination WAV for the cleaned voice')
     parser.add_argument('--live', action='store_true', help='run the real-time loop')
+    parser.add_argument('--preview', action='store_true',
+                        help='record a short mic + ANC preview clip and exit')
+    parser.add_argument('--preview-seconds', type=float, default=5.0,
+                        help='duration in seconds for --preview')
+    parser.add_argument('--preview-clean-wav', default=None,
+                        help='destination WAV for ANC-cleaned preview audio')
+    parser.add_argument('--preview-raw-wav', default=None,
+                        help='destination WAV for raw unfiltered mic preview audio')
+    parser.add_argument('--preview-id', default='preview',
+                        help='identifier emitted on preview JSON events')
     parser.add_argument('--selftest', action='store_true',
                         help='run the synthetic verification and exit')
     parser.add_argument('--backend', choices=('sounddevice', 'ffmpeg'),
@@ -1341,6 +1815,8 @@ def build_parser():
     parser.add_argument('--filter-length', type=int, default=DEFAULT_FILTER_LENGTH)
     parser.add_argument('--max-delay-ms', type=float, default=DEFAULT_MAX_DELAY_MS)
     parser.add_argument('--mu', type=float, default=DEFAULT_MU)
+    parser.add_argument('--engine', choices=('auto', 'webrtc', 'nlms'), default='auto',
+                        help='echo canceller for --live (auto prefers WebRTC AEC3)')
     parser.add_argument('--json', action='store_true', help='print machine-readable output')
     return parser
 
@@ -1354,6 +1830,12 @@ def canceller_kwargs(args):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.check_runtime:
+        available = _sd is not None and _np is not None
+        print(json.dumps({'ok': available, 'python': sys.executable,
+                          'sounddevice': _sd is not None, 'numpy': _np is not None}))
+        return 0 if available else 1
 
     if args.list_devices:
         return list_devices(json_output=args.json,
@@ -1384,6 +1866,27 @@ def main(argv=None):
             print('cleaned voice   %s' % args.out_wav)
         return 0
 
+    if args.preview:
+        if not args.preview_clean_wav:
+            parser.error('--preview requires --preview-clean-wav')
+        if _sd is None:
+            print(_install_hint(), file=sys.stderr)
+            return 1
+        try:
+            run_preview(clean_wav=args.preview_clean_wav, raw_wav=args.preview_raw_wav,
+                        seconds=args.preview_seconds, clip_id=args.preview_id,
+                        ref_device=args.ref_device, mic_device=args.mic_device,
+                        sample_rate=args.sample_rate, block_size=args.block,
+                        auto=True, json_output=args.json,
+                        preferred={'mic_device': args.prefer_mic_device,
+                                   'ref_device': args.prefer_ref_device,
+                                   'out_device': args.prefer_out_device},
+                        allow_external=args.prefer_usb, **canceller_kwargs(args))
+        except RuntimeError as error:
+            print(error, file=sys.stderr)
+            return 1
+        return 0
+
     if args.live:
         if args.backend == 'ffmpeg':
             if args.ref_index is None or args.mic_index is None or args.out_index is None:
@@ -1407,7 +1910,8 @@ def main(argv=None):
                  preferred={'mic_device': args.prefer_mic_device,
                             'ref_device': args.prefer_ref_device,
                             'out_device': args.prefer_out_device},
-                 allow_external=args.prefer_usb, **canceller_kwargs(args))
+                 allow_external=args.prefer_usb, engine=args.engine,
+                 **canceller_kwargs(args))
         return 0
 
     parser.print_help()
