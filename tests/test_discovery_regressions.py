@@ -30,7 +30,7 @@ class DiscoveryRegressions(unittest.TestCase):
         self.assertTrue(any(isinstance(h, client.urllib.request.ProxyHandler) and h.proxies == {} for h in handlers))
 
     def test_local_network_permission_denial_is_reported(self):
-        denied = client.urllib.error.URLError(OSError(65, 'No route to host'))
+        denied = client.urllib.error.URLError(OSError(client.errno.EHOSTUNREACH, 'No route to host'))
         with patch.dict(client.os.environ, {'ROKU_URL': 'http://192.168.1.99:8060'}), \
                 patch.object(client, 'http', side_effect=denied):
             result = client.discover_roku_devices(timeout=0.3, include_arp=False, include_ssdp=False)
