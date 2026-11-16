@@ -262,6 +262,7 @@ class DesktopController extends EventEmitter {
     this.configPath = path.resolve(options.configPath || defaultConfigPath())
     this.pythonPath = options.pythonPath || process.env.ROKU_SYNC_PYTHON || 'python3'
     this.spawn = options.spawn || spawn
+    this.platform = options.platform || process.platform
     this.devicePollMs = options.devicePollMs === undefined ? DEVICE_POLL_MS : options.devicePollMs
     this.mirrorPollMs = options.mirrorPollMs === undefined
       ? (process.env.ROKU_SYNC_TEST_OFFLINE === '1' ? 0 : MIRROR_POLL_MS)
@@ -1360,7 +1361,7 @@ class DesktopController extends EventEmitter {
   }
 
   openInChrome(chromeUrl) {
-    if (process.platform === 'darwin') {
+    if (this.platform === 'darwin') {
       try {
         const child = this.spawn('/usr/bin/open', this.referenceChromeArgs(chromeUrl), {
           stdio: 'ignore',

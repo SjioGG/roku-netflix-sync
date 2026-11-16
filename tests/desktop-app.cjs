@@ -1514,7 +1514,8 @@ async function main() {
       return child
     }
     const profile = path.join(dir, 'Reference Chrome')
-    const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn, referenceProfileDir: profile })
+    const controller = new DesktopController({ rootDir: ROOT, configPath: file, spawn: fakeSpawn,
+      platform: 'darwin', referenceProfileDir: profile })
     try {
       controller.startAnc()
       const anc = spawned.find((s) => s.args.some((a) => String(a).endsWith('aec_daemon.py')))
