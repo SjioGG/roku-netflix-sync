@@ -2,44 +2,105 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Roku sync settings</title>
+<meta name="color-scheme" content="light dark">
+<title>Roku Sync</title>
 <style>
-  body{font:13px/1.4 system-ui;width:420px;margin:0 auto;padding:10px;background:#171923;color:#fff}
-  h1{font-size:18px;margin:0 0 8px}
-  label{display:block;margin:6px 0}
-  input,select{box-sizing:border-box;width:100%;padding:6px;background:#fff;color:#171923;border:1px solid #65728b;border-radius:4px;color-scheme:light}
-  input[type=checkbox]{width:auto;margin-right:6px;vertical-align:middle}
-  button{color:#111827;background:#f3f4f6;padding:6px 10px;border:1px solid #65728b;border-radius:4px;cursor:pointer}
-  input:focus-visible,button:focus-visible,a:focus-visible,select:focus-visible{outline:3px solid #82baff;outline-offset:2px}
-  small{display:block;margin-top:4px;color:#d3d9e3}
-  a{color:#a8c9ff}
-  .disclosure{padding:8px;border:1px solid #65728b;border-radius:4px;background:#202538}
-  .disclosure p{margin:0 0 6px}
-  .disclosure{font-size:12px}
-  details{margin:8px 0}
-  summary{cursor:pointer}
-  #status{margin:8px 0}
-  .limits{font-size:12px;color:#d3d9e3;margin:8px 0 0}
+  :root{
+    --bg:#f6f4ef;--card:#fffdf9;--line:#e4dfd5;--text:#2b2a28;--muted:#6f6a61;
+    --accent:#4f7a6a;--accent-text:#fff;--accent-soft:#e3eee8;--warn:#a4622a;--warn-soft:#f6eadc;--focus:#7aa7c7;
+    --radius:12px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#1d1f22;--card:#25282c;--line:#363a40;--text:#e9e6e0;--muted:#a19c93;
+      --accent:#86b5a2;--accent-text:#14201b;--accent-soft:#2d3a35;--warn:#e0a36b;--warn-soft:#3a2f25;--focus:#8fb9d8;}
+  }
+  *{box-sizing:border-box}
+  body{font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;width:360px;margin:0 auto;padding:14px;background:var(--bg);color:var(--text)}
+  header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+  h1{font-size:17px;font-weight:650;margin:0}
+  h2{font-size:14px;font-weight:600;margin:0 0 6px}
+  .pill{font-size:12px;padding:3px 10px;border-radius:999px;background:var(--line);color:var(--muted);white-space:nowrap}
+  .pill.on{background:var(--accent-soft);color:var(--accent)}
+  .pill.warn{background:var(--warn-soft);color:var(--warn)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin-bottom:10px}
+  .muted{color:var(--muted);font-size:13px;margin:4px 0 0}
+  .row{display:flex;gap:8px;align-items:center}
+  .row>*{flex:1}
+  .stack>*+*{margin-top:8px}
+  label{display:block;font-size:13px;color:var(--muted)}
+  input,select{width:100%;margin-top:4px;padding:8px 10px;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px}
+  input[type=checkbox]{width:16px;height:16px;margin:0 8px 0 0;vertical-align:-3px;accent-color:var(--accent)}
+  .check{color:var(--text);font-size:14px;display:flex;align-items:flex-start}
+  .check input{flex:none;margin-top:2px}
+  button{font:inherit;font-weight:550;padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--muted)}
+  button:disabled{opacity:.45;cursor:default}
+  button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+  button.big{width:100%;padding:11px 12px;font-size:15px}
+  button.link{border:none;background:none;padding:0;color:var(--accent);font-weight:500;text-decoration:underline;cursor:pointer}
+  input:focus-visible,button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+  a{color:var(--accent)}
+  details>summary{cursor:pointer;font-weight:600;list-style:none;display:flex;justify-content:space-between}
+  details>summary::after{content:"Show";font-weight:400;color:var(--muted);font-size:13px}
+  details[open]>summary::after{content:"Hide"}
+  details[open]>summary{margin-bottom:10px}
+  .consent p{margin:0 0 8px;font-size:13px}
+  .consent.compact h2,.consent.compact p{display:none}
+  .consent.compact{padding:8px 12px}
+  .role{font-size:15px;font-weight:600;margin:0}
+  #status{min-height:1.2em;margin:4px 2px 0;font-size:13px;color:var(--muted)}
+  .hidden{display:none!important}
+  small{display:block;margin-top:4px;color:var(--muted);font-size:12px}
+  .fine{font-size:12px;color:var(--muted);margin:10px 2px 0}
 </style>
 </head>
 <body>
-<h1>Roku sync</h1>
-<section class="disclosure" aria-label="Data sharing">
-  <p>While enabled, your media ID, streaming service, position, play/pause and buffer state, timing, and random tab ID are sent to your chosen relay to synchronize playback. The relay operator and anyone with the room token can access room playback data and control playback. Only use a relay and room you trust.</p>
-  <a href="privacy.html" target="_blank" rel="noopener">Privacy and data handling</a>
-  <label><input id="consent" type="checkbox">I agree to share this playback data with my chosen relay and room.</label>
+<header>
+  <h1>Roku Sync</h1>
+  <span id="statePill" class="pill">Off</span>
+</header>
+
+<section id="consentCard" class="card consent" aria-label="Data sharing">
+  <h2>Before you start</h2>
+  <p id="consentText">While sync is on, your media ID, streaming service, position, play/pause and buffer state, timing, and a random tab ID are sent to your chosen relay. The relay operator and anyone with the room token or invite can see this and control playback. Only use a relay and room you trust.</p>
+  <label class="check"><input id="consent" type="checkbox"><span>I agree to share this with my relay and room. <a href="privacy.html" target="_blank" rel="noopener">Privacy</a></span></label>
 </section>
-<label><input id="enabled" type="checkbox">Enable Roku sync</label>
-<label>Sync mode<select id="syncMode"><option value="roku">Roku + Browser</option><option value="peer">Browser-to-Browser (Master/Slave, No Roku)</option></select></label>
-<button id="baton" type="button">Claim / Pass Master Baton</button>
-<label>Relay URL<input id="server" type="url" placeholder="https://your-relay.example" autocomplete="off"><small>Requires a running relay. Chrome will ask for access to this host when you Save.</small></label>
-<label>Room token<input id="token" type="password" autocomplete="off"></label>
-<details><summary>Timing adjustment (optional)</summary><label>Additional player trim (ms)<input id="rokuLeadMs" type="number" min="-1000" max="1000" step="1" value="0"><small>Optional adjustment for player resume speed. Timing compensation is an estimate.</small></label></details>
-<button id="connectApp" type="button">Connect Roku Sync app</button><small id="connectAppStatus">Lets the silent TV reference tab talk to Roku Sync.app on this Mac (127.0.0.1 only).</small>
-<button id="save" type="button">Save</button> <button id="forget" type="button">Forget relay settings</button>
+
+<section class="card stack" aria-label="Watch together">
+  <h2>Watch together</h2>
+  <div id="roomInfo" class="hidden">
+    <p id="roomState" class="role">Room ready</p>
+    <p id="people" class="muted">Open Netflix or YouTube to start.</p>
+  </div>
+  <button id="baton" class="primary big hidden" type="button">Take control</button>
+  <label class="check"><input id="enabled" type="checkbox"><span>Sync on</span></label>
+  <div class="row">
+    <button id="createRoom" type="button">Create room</button>
+    <button id="copyInvite" type="button" disabled>Copy invite</button>
+  </div>
+  <label>Got an invite? Paste it here
+    <input id="invite" type="text" spellcheck="false" autocomplete="off" placeholder="https://…/#room=…">
+  </label>
+</section>
+
+<details class="card">
+  <summary>Settings</summary>
+  <div class="stack">
+    <label>Mode<select id="syncMode"><option value="peer">Browser to browser</option><option value="roku">Roku TV + browser</option></select></label>
+    <label>Relay<input id="server" type="url" placeholder="https://your-relay.example" autocomplete="off"></label>
+    <label>Room token<input id="token" type="password" autocomplete="off"></label>
+    <label>Start offset (ms)<input id="rokuLeadMs" type="number" min="-1000" max="1000" step="1" value="0"><small>Only if one side always starts a bit late.</small></label>
+    <div>
+      <button id="connectApp" type="button">Connect Roku Sync app</button>
+      <small id="connectAppStatus">Only needed on the Mac next to the Roku TV.</small>
+    </div>
+    <button id="forget" type="button">Forget room and relay</button>
+  </div>
+</details>
+
+<button id="save" class="primary big" type="button">Save</button>
 <p id="status" role="status"></p>
-<small>Save opens setup in a tab. Save there to approve relay access and finish connecting.</small>
-<p class="limits">Experimental; features vary by service. Roku mode needs a bridge or local relay. Exact Roku seeking and frame accuracy are not guaranteed. Unofficial, not endorsed by Roku or streaming services.</p>
+<p class="fine">Unofficial and experimental. Not endorsed by Roku or streaming services.</p>
 <script src="popup.js"></script>
 </body>
 </html>

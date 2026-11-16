@@ -85,7 +85,7 @@
   chrome.storage?.onChanged?.addListener?.((changes,area)=>{
     if(area!=='local') return;
     const roomChanged=['server','token'].some(key=>changes[key] && changes[key].newValue!==settings[key]);
-    for(const key of ['enabled','privacyConsent','server','token','syncMode']) {
+    for(const key of ['enabled','privacyConsent','server','token','syncMode','roomOwner']) {
       if(changes[key]) {settings[key]=changes[key].newValue;changedSettings.add(key);}
     }
     if(roomChanged && roomUsed) {
@@ -223,17 +223,36 @@
     if(isRefTab) return false;
     return !state?.master_client_id || state.master_client_id===clientId;
   }
-  function batonToggle() {
+  function batonToggle(want) {
     const master=isMasterClient();
-    send({type:'baton',data:{action:master?'pass':'claim',client_id:clientId,sync_mode:'peer'}}).then(result=>{
-      if(invalidated) return;
-      if(result.error) {say('Baton failed · '+result.error);return;}
-      if(!master && video) {
+    const claim=want==='claim' || (want!=='pass' && !master);
+    return send({type:'baton',data:{action:claim?'claim':'pass',client_id:clientId,sync_mode:'peer'}}).then(result=>{
+      if(invalidated) return result;
+      if(result.error) {say('Baton failed · '+result.error);return result;}
+      if(state && result.data) state.master_client_id=result.data.master_client_id;
+      if(claim && video) {
         // Announce our own position so slaves follow the new master immediately.
         send({type:'event',action:video.paused?'pause':'play',position:Math.round(video.currentTime*1000),client_id:clientId,app:detectMedia()?.app||'netflix'});
       }
-      say(master?'Baton passed to another browser':'Master baton claimed');
+      say(claim?'You are in control':'Control handed over');
+      return result;
     });
+  }
+  function roomPeople() {
+    const now=Date.now()+(clockOffsetMs||0);
+    return Object.entries(state?.clients||{}).filter(([id,c])=>!id.startsWith('ref-') && c && now-(c.received_at_ms||0)<20000).length;
+  }
+  function roomStatus() {
+    return {ok:true, peer:peerMode(), master:isMasterClient(), people:roomPeople(), connected:!!state,
+      playing:video?!video.paused:null, title:detectMedia()?.titleId||null, room:state?.room||null};
+  }
+  // The person who created a browser room starts in control, even when a
+  // friend's tab reached the room first. It claims once, then follows the baton.
+  function claimCreatedRoom(peer) {
+    if(isRefTab || !peer || !video || !settings.roomOwner || settings.roomOwner!==settings.token || !state) return;
+    chrome.storage?.local?.set?.({roomOwner:null});
+    settings.roomOwner=null;
+    if(state.master_client_id && state.master_client_id!==clientId) batonToggle('claim');
   }
   function masterTarget(master) {
     const base=Number.isFinite(master.position_ms)?master.position_ms:null;
@@ -815,6 +834,7 @@
       const media=detectMedia();
       const watchTitle=media?media.titleId:null;
       const peer=peerMode();
+      claimCreatedRoom(peer);
       const master=isMasterClient();
       if(video && watchTitle && !telemetryInFlight && Number.isFinite(video.currentTime)) {
         telemetryInFlight=true;
@@ -921,6 +941,11 @@
   chrome.runtime?.onMessage?.addListener?.((message, sender, respond)=>{
     if(!syncEnabled) {respond?.({ok:false,disabled:true});return;}
     if(message?.type==='baton-toggle') {batonToggle();respond?.({ok:true});return;}
+    if(message?.type==='baton-claim' || message?.type==='baton-pass') {
+      batonToggle(message.type==='baton-claim'?'claim':'pass').then(result=>respond?.(result?.error?{ok:false,error:result.error}:roomStatus()));
+      return true;
+    }
+    if(message?.type==='room-status') {respond?.(roomStatus());return;}
     if(message?.type==='sync-mode') {
       setSyncMode(message.sync_mode);
       send({type:'baton',data:{action:'mode',client_id:clientId,sync_mode:syncMode}});
@@ -931,7 +956,7 @@
     badge.style.display='';
     pollLocalReference();
   }
-  if(chrome.storage?.local?.get) chrome.storage.local.get(['enabled','syncMode','privacyConsent','server','token'],res=>{
+  if(chrome.storage?.local?.get) chrome.storage.local.get(['enabled','syncMode','privacyConsent','server','token','roomOwner'],res=>{
     if(invalidated) return;
     for(const key of Object.keys(res || {})) if(!changedSettings.has(key)) settings[key]=res[key];
     applySettings();

@@ -69,7 +69,19 @@ The **Sync mode** selector picks between **Roku + Browser** (the default) and
 Roku is needed: one tab holds the master baton and publishes its play, pause and
 seek, while the other tabs follow it. The badge reads `Peer sync (Master)` or
 `Peer sync (Slave)`, and clicking it passes or claims the baton, as does the
-popup's **Claim / Pass Master Baton** button.
+popup's **Take control** / **Hand over control** button.
+
+**Rooms and invites.** The popup's **Create room** button asks the relay
+(`POST /rooms`, no token needed) for a fresh browser room and switches to
+browser-to-browser mode. Whoever creates the room starts in control; anyone can
+take control at any time, and the person in control can hand it over. **Copy
+invite** copies `https://<relay>/#room=<token>`; the other people paste it
+under **Got an invite?**. Any number of people can join a room. Browser rooms
+have no Roku TV; the operator `SYNC_TOKEN` room is the only one with the Roku
+bridge. Rooms live in memory, expire after 12 idle hours (`ROOM_IDLE_HOURS`),
+and vanish when the relay restarts. The relay holds at most 200 rooms
+(`ROOM_LIMIT`), creates at most 60 an hour and 10 an hour per address, and
+`ROOM_CREATION=0` turns creation off.
 
 The content script runs on Netflix, YouTube, Plex, Prime Video, Disney+,
 Max, Apple TV, Hulu and Twitch ([BEE-229](https://linear.app/beeros/issue/BEE-229)). These integrations are experimental and do not have feature parity.
